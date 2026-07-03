@@ -1,0 +1,13 @@
+/** 全局样式变量 */
+$primary-color: #409eff;
+$sidebar-bg: #304156;
+$sidebar-active: #409eff;
+$text-color: #333;
+$text-color-light: #909399;
+$border-color: #ebeef5;
+$bg-color: #f5f7fa;
+
+body {
+  background-color: $bg-color;
+  color: $text-color;
+}
