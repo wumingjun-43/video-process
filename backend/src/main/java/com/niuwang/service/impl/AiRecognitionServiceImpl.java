@@ -9,14 +9,20 @@ import com.niuwang.model.dto.BullKingMatchDTO;
 import com.niuwang.model.entity.BullKing;
 import com.niuwang.model.entity.BullKingImage;
 import com.niuwang.model.entity.KnowledgeFile;
+import com.niuwang.model.vo.FaceAnalysisResult;
+import com.niuwang.model.vo.FaceMatchResultVO;
 import com.niuwang.model.vo.FeatureAnalysisVO;
 import com.niuwang.model.vo.MatchResultVO;
 import com.niuwang.service.AiRecognitionService;
 import com.niuwang.service.MatchRecordService;
 import lombok.RequiredArgsConstructor;
 import org.springframework.ai.chat.client.ChatClient;
+import org.springframework.ai.chat.messages.AssistantMessage;
+import org.springframework.ai.chat.messages.UserMessage;
 import org.springframework.ai.chat.model.ChatModel;
+import org.springframework.ai.chat.model.ChatResponse;
 import org.springframework.ai.chat.prompt.Prompt;
+import org.springframework.ai.content.Media;
 import org.springframework.ai.document.Document;
 import org.springframework.ai.vectorstore.SearchRequest;
 import org.springframework.ai.vectorstore.VectorStore;
@@ -27,8 +33,7 @@ import org.springframework.web.multipart.MultipartFile;
 
 import java.io.File;
 import java.math.BigDecimal;
-import java.util.ArrayList;
-import java.util.List;
+import java.util.*;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 import java.util.stream.Collectors;
@@ -257,5 +262,235 @@ public class AiRecognitionServiceImpl implements AiRecognitionService {
             return response.substring(start, end + 1);
         }
         return response;
+    }
+
+    // ==================== 人脸识别相关方法 ====================
+
+    @Override
+    public float[] extractFaceEmbedding(MultipartFile image) {
+        try {
+            String prompt = "Extract the facial embedding vector from this image. "
+                    + "Return ONLY a comma-separated list of 512 floating-point numbers between -1 and 1. "
+                    + "Example format: 0.123,-0.456,0.789,... "
+                    + "Do NOT include any other text, explanations, or formatting. "
+                    + "If you cannot detect a clear face, return zeros.";
+
+            UserMessage userMsg = UserMessage.builder()
+                    .text(prompt)
+                    .build();
+            Prompt p = new Prompt(userMsg);
+            ChatResponse response = chatModel.call(p);
+            String aiOutput = response.getResults().get(0).getOutput().getText();
+
+            return parseFloatArray(aiOutput);
+
+        } catch (BusinessException e) {
+            throw e;
+        } catch (Exception e) {
+            throw new BusinessException("人脸特征提取失败: " + e.getMessage());
+        }
+    }
+
+    @Override
+    public FaceMatchResultVO matchFaceByAI(MultipartFile queryImage, List<FaceCandidate> candidates) {
+        try {
+            byte[] queryBytes = queryImage.getBytes();
+            org.springframework.util.MimeType jpegType = new org.springframework.util.MimeType("image", "jpeg");
+            Media queryMedia = Media.builder().mimeType(jpegType).data(queryBytes).build();
+
+            StringBuilder prompt = new StringBuilder();
+            prompt.append("You are a face recognition assistant. Your task is to identify which person from the reference photos matches the query photo.\n\n");
+            prompt.append("QUERY PHOTO:\n");
+            prompt.append("(This is the photo to be identified)\n\n");
+
+            prompt.append("REFERENCE PHOTOS:\n");
+            for (int i = 0; i < candidates.size(); i++) {
+                FaceCandidate c = candidates.get(i);
+                prompt.append((i + 1)).append(". User ID=").append(c.getUserId())
+                        .append(", Name=").append(c.getUserName())
+                        .append(", Cosine Similarity=").append(String.format("%.4f", c.getCosineSimilarity()))
+                        .append("\n");
+            }
+
+            prompt.append("\nCompare the query photo with the reference photos above. ");
+            prompt.append("Identify which user is the best match based on facial features. ");
+            prompt.append("Return ONLY a JSON object: {\"userId\": <matched_user_id_or_0>, \"confidence\": <0-1>, \"aiAnalysis\": \"brief reasoning\"}\n");
+            prompt.append("If no match is good enough, return {\"userId\": 0, \"confidence\": 0.0, \"aiAnalysis\": \"No suitable match found\"}");
+
+            // 构建多模态消息
+            List<org.springframework.ai.chat.messages.Message> messages = new ArrayList<>();
+
+            // 查询图片（带文本和图片）
+            UserMessage queryMsg = UserMessage.builder()
+                    .text(prompt.toString())
+                    .media(queryMedia)
+                    .build();
+            messages.add(queryMsg);
+
+            // 添加候选人的参考图片
+            for (int i = 0; i < candidates.size(); i++) {
+                FaceCandidate c = candidates.get(i);
+                if (c.getFaceImageUrl() != null && !c.getFaceImageUrl().isEmpty()) {
+                    String fullPath = uploadPath + c.getFaceImageUrl();
+                    File refFile = new File(fullPath);
+                    if (refFile.exists()) {
+                        byte[] refBytes = new byte[(int) refFile.length()];
+                        try (java.io.FileInputStream fis = new java.io.FileInputStream(refFile)) {
+                            fis.read(refBytes);
+                        }
+                        Media refMedia = Media.builder().mimeType(jpegType).data(refBytes).build();
+                        AssistantMessage candidateMsg = AssistantMessage.builder()
+                                .content("Reference photo for user " + c.getUserId() + " (" + c.getUserName() + ")")
+                                .media(java.util.List.of(refMedia))
+                                .build();
+                        messages.add(candidateMsg);
+                    }
+                }
+            }
+
+            // 使用 ChatClient 发送多轮对话
+            Prompt multiModalPrompt = new Prompt(messages);
+            ChatResponse response = chatModel.call(multiModalPrompt);
+            String aiResponse = response.getResults().get(0).getOutput().getText();
+
+            FaceMatchResultVO result = new FaceMatchResultVO();
+            result.setCandidates(candidates.stream().map(c -> {
+                FaceMatchResultVO.CandidateInfo info = new FaceMatchResultVO.CandidateInfo();
+                info.setUserId(c.getUserId());
+                info.setUserName(c.getUserName());
+                info.setFaceImageUrl(c.getFaceImageUrl());
+                info.setCosineSimilarity(new BigDecimal(c.getCosineSimilarity()));
+                return info;
+            }).collect(Collectors.toList()));
+
+            parseFaceMatchResult(aiResponse, result);
+
+            return result;
+
+        } catch (BusinessException e) {
+            throw e;
+        } catch (Exception e) {
+            throw new BusinessException("AI人脸精排匹配失败: " + e.getMessage());
+        }
+    }
+
+    @Override
+    public FaceAnalysisResult analyzeFace(MultipartFile image) {
+        try {
+            String prompt = "Analyze this face photo and evaluate its quality for face recognition. "
+                    + "Check: face count, whether it is a clear frontal face, pose angle, lighting quality. "
+                    + "Return ONLY a JSON object: {\"faceCount\": <number>, \"isClearFrontal\": <true/false>, "
+                    + "\"poseEvaluation\": \"description\", \"lightingEvaluation\": \"description\", "
+                    + "\"qualityScore\": <0-1>, \"analysis\": \"summary\"}";
+
+            UserMessage userMsg = UserMessage.builder()
+                    .text(prompt)
+                    .build();
+            Prompt p = new Prompt(userMsg);
+            ChatResponse response = chatModel.call(p);
+            String aiResponse = response.getResults().get(0).getOutput().getText();
+
+            FaceAnalysisResult result = new FaceAnalysisResult();
+            String jsonStr = extractJson(aiResponse);
+
+            try {
+                Pattern countPattern = Pattern.compile("\"faceCount\"\\s*:\\s*(\\d+)");
+                Matcher m = countPattern.matcher(jsonStr);
+                if (m.find()) result.setFaceCount(Integer.parseInt(m.group(1)));
+
+                Pattern boolPattern = Pattern.compile("\"isClearFrontal\"\\s*:\\s*(true|false)");
+                m = boolPattern.matcher(jsonStr);
+                if (m.find()) result.setIsClearFrontal(Boolean.parseBoolean(m.group(1)));
+
+                extractStringField(jsonStr, "\"poseEvaluation\"", result::setPoseEvaluation);
+                extractStringField(jsonStr, "\"lightingEvaluation\"", result::setLightingEvaluation);
+
+                Pattern scorePattern = Pattern.compile("\"qualityScore\"\\s*:\\s*([\\d.]+)");
+                m = scorePattern.matcher(jsonStr);
+                if (m.find()) result.setQualityScore(Double.parseDouble(m.group(1)));
+
+                extractStringField(jsonStr, "\"analysis\"", result::setAnalysis);
+            } catch (Exception ignored) {
+                result.setAnalysis(aiResponse);
+            }
+
+            if (result.getFaceCount() == null) result.setFaceCount(0);
+            if (result.getQualityScore() == null) result.setQualityScore(0.0);
+
+            return result;
+
+        } catch (BusinessException e) {
+            throw e;
+        } catch (Exception e) {
+            throw new BusinessException("人脸分析失败: " + e.getMessage());
+        }
+    }
+
+    /** 解析逗号分隔的浮点数数组 */
+    private float[] parseFloatArray(String text) {
+        String cleaned = text.replaceAll("[^0-9.,\\-]", "").trim();
+        if (cleaned.isEmpty()) {
+            return new float[512]; // 默认零向量
+        }
+        String[] parts = cleaned.split(",");
+        float[] vector = new float[Math.min(parts.length, 512)];
+        for (int i = 0; i < vector.length; i++) {
+            try {
+                vector[i] = Float.parseFloat(parts[i].trim());
+            } catch (NumberFormatException e) {
+                vector[i] = 0f;
+            }
+        }
+        return vector;
+    }
+
+    /** 解析人脸匹配结果 */
+    private void parseFaceMatchResult(String response, FaceMatchResultVO result) {
+        result.setConfidenceScore(BigDecimal.ZERO);
+        result.setIsMatch(false);
+
+        String jsonStr = extractJson(response);
+
+        try {
+            Pattern userIdPattern = Pattern.compile("\"userId\"\\s*:\\s*(\\d+)");
+            Matcher matcher = userIdPattern.matcher(jsonStr);
+            if (matcher.find()) {
+                Long matchedId = Long.parseLong(matcher.group(1));
+                if (matchedId > 0) {
+                    result.setUserId(matchedId);
+                }
+            }
+
+            Pattern confPattern = Pattern.compile("\"confidence\"\\s*:\\s*([\\d.]+)");
+            matcher = confPattern.matcher(jsonStr);
+            if (matcher.find()) {
+                BigDecimal confidence = new BigDecimal(matcher.group(1));
+                result.setConfidenceScore(confidence);
+                result.setIsMatch(confidence.doubleValue() >= 0.75);
+            }
+
+            Pattern analysisPattern = Pattern.compile("\"aiAnalysis\"\\s*:\\s*\"([^\"]*)\"");
+            matcher = analysisPattern.matcher(jsonStr);
+            if (matcher.find()) {
+                result.setAiAnalysis(matcher.group(1));
+            }
+        } catch (Exception e) {
+            result.setAiAnalysis("AI分析: " + response.substring(0, Math.min(500, response.length())));
+        }
+    }
+
+    /** 从JSON中抽取字符串字段 */
+    private void extractStringField(String json, String key, java.util.function.Consumer<String> setter) {
+        try {
+            int start = json.indexOf(key);
+            if (start >= 0) {
+                int colon = json.indexOf(':', start + key.length());
+                int quote1 = json.indexOf('"', colon + 1);
+                int quote2 = json.indexOf('"', quote1 + 1);
+                if (quote2 > quote1) {
+                    setter.accept(json.substring(quote1 + 1, quote2));
+                }
+            }
+        } catch (Exception ignored) {}
     }
 }

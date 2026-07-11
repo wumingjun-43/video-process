@@ -18,4 +18,10 @@ public class UserInfoVO {
     private Integer age;
     private Integer gender;
     private String genderText;
+
+    /** 是否已注册人脸 */
+    private Boolean hasFace;
+
+    /** 人脸照片URL */
+    private String faceImageUrl;
 }

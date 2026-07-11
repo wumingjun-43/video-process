@@ -4,7 +4,9 @@ import com.baomidou.mybatisplus.extension.service.IService;
 import com.niuwang.common.response.PageResult;
 import com.niuwang.model.dto.UserDTO;
 import com.niuwang.model.entity.User;
+import com.niuwang.model.vo.FaceMatchResultVO;
 import com.niuwang.model.vo.UserInfoVO;
+import org.springframework.web.multipart.MultipartFile;
 
 /**
  * 用户服务接口
@@ -25,4 +27,13 @@ public interface UserService extends IService<User> {
 
     /** 删除用户 */
     void deleteUser(Long id);
+
+    /** 注册用户人脸 */
+    void registerFace(Long userId, MultipartFile faceImage);
+
+    /** 删除用户人脸 */
+    void removeFace(Long userId);
+
+    /** 人脸匹配 */
+    FaceMatchResultVO matchFace(MultipartFile image);
 }

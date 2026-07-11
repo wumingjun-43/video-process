@@ -19,6 +19,9 @@ public class MatchRecord extends BaseEntity {
     /** 匹配的牛王ID */
     private Long bullKingId;
 
+    /** 匹配的用户ID(人脸识别用) */
+    private Long userId;
+
     /** 上传的匹配图片路径 */
     private String imageUrl;
 

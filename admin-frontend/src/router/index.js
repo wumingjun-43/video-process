@@ -62,6 +62,18 @@ const routes = [
         component: () => import('@/views/matchRecord/MatchRecordList.vue'),
         meta: { title: '匹配记录', icon: 'Tickets' },
       },
+      {
+        path: 'face/register',
+        name: 'FaceRegister',
+        component: () => import('@/views/face/FaceRegister.vue'),
+        meta: { title: '人脸注册', icon: 'UserFilled' },
+      },
+      {
+        path: 'face/match',
+        name: 'FaceMatch',
+        component: () => import('@/views/face/FaceMatch.vue'),
+        meta: { title: '人脸匹配', icon: 'Picture' },
+      },
     ],
   },
 ]

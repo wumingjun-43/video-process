@@ -39,6 +39,14 @@
           <el-icon><Tickets /></el-icon>
           <span>匹配记录</span>
         </el-menu-item>
+        <el-menu-item index="/face/register">
+          <el-icon><UserFilled /></el-icon>
+          <span>人脸注册</span>
+        </el-menu-item>
+        <el-menu-item index="/face/match">
+          <el-icon><Picture /></el-icon>
+          <span>人脸匹配</span>
+        </el-menu-item>
       </el-menu>
     </el-aside>
 

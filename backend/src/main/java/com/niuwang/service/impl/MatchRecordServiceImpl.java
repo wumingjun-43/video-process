@@ -31,6 +31,17 @@ public class MatchRecordServiceImpl extends ServiceImpl<MatchRecordMapper, Match
     }
 
     @Override
+    @Transactional(rollbackFor = Exception.class)
+    public Long saveFaceMatchRecord(Long userId, String imageUrl, Double confidenceScore) {
+        MatchRecord record = new MatchRecord();
+        record.setUserId(userId);
+        record.setImageUrl(imageUrl);
+        record.setConfidenceScore(BigDecimal.valueOf(confidenceScore));
+        save(record);
+        return record.getId();
+    }
+
+    @Override
     public PageResult<MatchRecord> pageMatchRecord(long page, long size) {
         Page<MatchRecord> pageParam = new Page<>(page, size);
         Page<MatchRecord> result = page(pageParam, new com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper<MatchRecord>()
