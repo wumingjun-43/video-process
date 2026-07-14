@@ -16,7 +16,7 @@ public class SpringAiConfig {
      * 创建 ChatClient Bean，用于图片识别和知识图谱分析
      */
     @Bean
-    public ChatClient chatClient(ChatModel chatModel) {
+    public ChatClient chatClient(@org.springframework.beans.factory.annotation.Qualifier("dashScopeChatModel") ChatModel chatModel) {
         return ChatClient.builder(chatModel).build();
     }
 }

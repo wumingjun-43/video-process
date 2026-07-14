@@ -31,10 +31,4 @@ public class User extends BaseEntity {
 
     /** 人脸照片存储路径 */
     private String faceImageUrl;
-
-    /** 人脸特征向量(DashScope embedding,逗号分隔浮点数) */
-    private String faceFeatureVector;
-
-    /** 人脸参考图片URL列表(JSON数组字符串) */
-    private String faceReferenceUrls;
 }

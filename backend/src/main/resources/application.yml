@@ -26,36 +26,49 @@ spring:
       max-file-size: 20MB
       max-request-size: 100MB
 
-  # --- 数据源配置（Druid + MySQL 8.0） ---
+  # --- Dynamic Datasource 多数据源配置 ---
   datasource:
-    type: com.alibaba.druid.pool.DruidDataSource
-    driver-class-name: com.mysql.cj.jdbc.Driver
-    url: jdbc:mysql://localhost:3306/niuwang?useUnicode=true&characterEncoding=utf-8&useSSL=false&serverTimezone=Asia/Shanghai&allowPublicKeyRetrieval=true
-    username: root
-    password: 123456
-    druid:
-      initial-size: 5
-      min-idle: 5
-      max-active: 20
-      max-wait: 60000
-      time-between-eviction-runs-millis: 60000
-      min-evictable-idle-time-millis: 300000
-      validation-query: SELECT 1
-      test-while-idle: true
-      test-on-borrow: false
-      test-on-return: false
-      pool-prepared-statements: true
-      max-pool-prepared-statement-per-connection-size: 20
-      stat-view-servlet:
-        enabled: true
-        url-pattern: /druid/*
-        reset-enable: false
-        login-username: admin
-        login-password: admin123
-      web-stat-filter:
-        enabled: true
-        url-pattern: /*
-        exclusions: "*.js,*.gif,*.jpg,*.png,*.css,*.ico,/druid/*"
+    dynamic:
+      primary: master
+      strict: false
+      datasource:
+        # 主库: MySQL (业务数据)
+        master:
+          type: com.alibaba.druid.pool.DruidDataSource
+          driver-class-name: com.mysql.cj.jdbc.Driver
+          url: jdbc:mysql://localhost:3306/niuwang?useUnicode=true&characterEncoding=utf-8&useSSL=false&serverTimezone=Asia/Shanghai&allowPublicKeyRetrieval=true
+          username: root
+          password: 123456
+        # 从库: PostgreSQL (pgvector 向量存储)
+        slave:
+          type: com.alibaba.druid.pool.DruidDataSource
+          driver-class-name: org.postgresql.Driver
+          url: jdbc:postgresql://localhost:5432/niuwang
+          username: postgres
+          password: 123456
+      druid:
+        initial-size: 5
+        min-idle: 5
+        max-active: 20
+        max-wait: 60000
+        time-between-eviction-runs-millis: 60000
+        min-evictable-idle-time-millis: 300000
+        validation-query: SELECT 1
+        test-while-idle: true
+        test-on-borrow: false
+        test-on-return: false
+        pool-prepared-statements: true
+        max-pool-prepared-statement-per-connection-size: 20
+        stat-view-servlet:
+          enabled: true
+          url-pattern: /druid/*
+          reset-enable: false
+          login-username: admin
+          login-password: admin123
+        web-stat-filter:
+          enabled: true
+          url-pattern: /*
+          exclusions: "*.js,*.gif,*.jpg,*.png,*.css,*.ico,/druid/*"
 
   # --- Redis 配置 ---
   data:
@@ -138,6 +151,8 @@ file:
 # 人脸识别配置
 # =====================================================
 face:
+  python-script: classpath:scripts/face_extract.py
+  python-command: python
   matching:
     candidate-count: 5
     confidence-threshold: 0.75

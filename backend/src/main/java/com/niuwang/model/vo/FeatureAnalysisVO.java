@@ -1,13 +1,14 @@
 package com.niuwang.model.vo;
 
-import lombok.Data;
+import lombok.Getter;
+import lombok.Setter;
 
 import java.util.List;
 
 /**
  * 牛王特征分析VO
  */
-@Data
+@Getter @Setter
 public class FeatureAnalysisVO {
 
     /** 牛角特征描述 */

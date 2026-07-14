@@ -14,6 +14,7 @@ import com.niuwang.model.vo.FaceMatchResultVO;
 import com.niuwang.model.vo.FeatureAnalysisVO;
 import com.niuwang.model.vo.MatchResultVO;
 import com.niuwang.service.AiRecognitionService;
+import com.niuwang.service.FaceEmbeddingService;
 import com.niuwang.service.MatchRecordService;
 import lombok.RequiredArgsConstructor;
 import org.springframework.ai.chat.client.ChatClient;
@@ -43,16 +44,38 @@ import java.util.stream.Collectors;
  * 基于 spring-ai-alibaba DashScope 模型进行牛王匹配和特征分析
  */
 @Service
-@RequiredArgsConstructor
+
 public class AiRecognitionServiceImpl implements AiRecognitionService {
 
     private final ChatClient chatClient;
+    @org.springframework.beans.factory.annotation.Qualifier("dashScopeChatModel")
     private final ChatModel chatModel;
     private final VectorStore vectorStore;
     private final BullKingMapper bullKingMapper;
     private final BullKingImageMapper bullKingImageMapper;
     private final KnowledgeFileMapper knowledgeFileMapper;
     private final MatchRecordService matchRecordService;
+    private final FaceEmbeddingService faceEmbeddingService;
+
+    public AiRecognitionServiceImpl(
+            ChatClient chatClient,
+            @org.springframework.beans.factory.annotation.Qualifier("dashScopeChatModel") ChatModel chatModel,
+            VectorStore vectorStore,
+            BullKingMapper bullKingMapper,
+            BullKingImageMapper bullKingImageMapper,
+            KnowledgeFileMapper knowledgeFileMapper,
+            MatchRecordService matchRecordService,
+            FaceEmbeddingService faceEmbeddingService) {
+        this.chatClient = chatClient;
+        this.chatModel = chatModel;
+        this.vectorStore = vectorStore;
+        this.bullKingMapper = bullKingMapper;
+        this.bullKingImageMapper = bullKingImageMapper;
+        this.knowledgeFileMapper = knowledgeFileMapper;
+        this.matchRecordService = matchRecordService;
+        this.faceEmbeddingService = faceEmbeddingService;
+    }
+
 
     @Value("${file.upload.path}")
     private String uploadPath;
@@ -268,35 +291,17 @@ public class AiRecognitionServiceImpl implements AiRecognitionService {
 
     @Override
     public float[] extractFaceEmbedding(MultipartFile image) {
-        try {
-            String prompt = "Extract the facial embedding vector from this image. "
-                    + "Return ONLY a comma-separated list of 512 floating-point numbers between -1 and 1. "
-                    + "Example format: 0.123,-0.456,0.789,... "
-                    + "Do NOT include any other text, explanations, or formatting. "
-                    + "If you cannot detect a clear face, return zeros.";
-
-            UserMessage userMsg = UserMessage.builder()
-                    .text(prompt)
-                    .build();
-            Prompt p = new Prompt(userMsg);
-            ChatResponse response = chatModel.call(p);
-            String aiOutput = response.getResults().get(0).getOutput().getText();
-
-            return parseFloatArray(aiOutput);
-
-        } catch (BusinessException e) {
-            throw e;
-        } catch (Exception e) {
-            throw new BusinessException("人脸特征提取失败: " + e.getMessage());
-        }
+        return faceEmbeddingService.extractFaceEmbedding(image);
     }
 
     @Override
     public FaceMatchResultVO matchFaceByAI(MultipartFile queryImage, List<FaceCandidate> candidates) {
         try {
             byte[] queryBytes = queryImage.getBytes();
-            org.springframework.util.MimeType jpegType = new org.springframework.util.MimeType("image", "jpeg");
-            Media queryMedia = Media.builder().mimeType(jpegType).data(queryBytes).build();
+            org.springframework.ai.content.Media queryMedia = org.springframework.ai.content.Media.builder()
+                    .mimeType(org.springframework.util.MimeTypeUtils.IMAGE_JPEG)
+                    .data(queryBytes)
+                    .build();
 
             StringBuilder prompt = new StringBuilder();
             prompt.append("You are a face recognition assistant. Your task is to identify which person from the reference photos matches the query photo.\n\n");
@@ -338,7 +343,10 @@ public class AiRecognitionServiceImpl implements AiRecognitionService {
                         try (java.io.FileInputStream fis = new java.io.FileInputStream(refFile)) {
                             fis.read(refBytes);
                         }
-                        Media refMedia = Media.builder().mimeType(jpegType).data(refBytes).build();
+                        org.springframework.ai.content.Media refMedia = org.springframework.ai.content.Media.builder()
+                                .mimeType(org.springframework.util.MimeTypeUtils.IMAGE_JPEG)
+                                .data(refBytes)
+                                .build();
                         AssistantMessage candidateMsg = AssistantMessage.builder()
                                 .content("Reference photo for user " + c.getUserId() + " (" + c.getUserName() + ")")
                                 .media(java.util.List.of(refMedia))
