@@ -1,12 +1,15 @@
 import request from '@/utils/request'
 
+// 后端访问 URL 前缀（用于完整图片 URL）
+const ACCESS_URL = '/upload'
+
 /**
  * 注册用户人脸
  */
 export function registerFace(data) {
   const formData = new FormData()
   formData.append('userId', data.userId)
-  formData.append('faceImage', data.faceImage)
+  formData.append('image', data.faceImage)
   return request.post('/face/register', formData)
 }
 
@@ -30,5 +33,11 @@ export function matchFace(data) {
  * 获取所有已注册用户人脸列表
  */
 export function getUserFaces() {
-  return request.get('/face/users')
+  return request.get('/face/users').then(users => {
+    // 为每个用户的人脸图片补全完整 URL
+    return (users || []).map(u => ({
+      ...u,
+      faceImageUrl: u.faceImageUrl ? `${ACCESS_URL}${u.faceImageUrl}` : '',
+    }))
+  })
 }

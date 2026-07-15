@@ -14,8 +14,10 @@ const request = axios.create({
 // 请求拦截器
 request.interceptors.request.use(
   (config) => {
+    console.log('[REQUEST]', config.method?.toUpperCase(), config.url, config.params, config.data)
     const token = localStorage.getItem('token')
-    if (token && config.url !== '/auth/login') {
+    // 非登录接口和非匿名接口都带上 token
+    if (token && !config.url.startsWith('/auth/login') && !config.url.startsWith('/auth/face-login')) {
       config.headers.Authorization = `Bearer ${token}`
     }
     // FormData 请求：让浏览器自动设置 Content-Type 和 boundary
@@ -24,13 +26,17 @@ request.interceptors.request.use(
     }
     return config
   },
-  (error) => Promise.reject(error)
+  (error) => {
+    console.error('[REQUEST ERROR]', error)
+    return Promise.reject(error)
+  }
 )
 
 // 响应拦截器
 request.interceptors.response.use(
   (response) => {
     const { code, message, data } = response.data
+    console.log('[RESPONSE]', response.config.url, code, data)
     if (code === 200) {
       return data
     }
@@ -39,7 +45,8 @@ request.interceptors.response.use(
   },
   (error) => {
     if (error.response) {
-      const { status } = error.response
+      const { status, data } = error.response
+      console.error('[RESPONSE ERROR]', error.config?.url, status, data)
       if (status === 401) {
         const authStore = useAuthStore()
         authStore.logout()
@@ -50,10 +57,11 @@ request.interceptors.response.use(
       } else if (status >= 500) {
         ElMessage.error('服务器内部错误')
       } else {
-        const msg = error.response.data?.message || '请求失败'
+        const msg = data?.message || '请求失败'
         ElMessage.error(msg)
       }
     } else {
+      console.error('[NETWORK ERROR]', error.message)
       ElMessage.error('网络错误，请检查网络连接')
     }
     return Promise.reject(error)

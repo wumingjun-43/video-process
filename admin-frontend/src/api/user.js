@@ -1,11 +1,18 @@
 import request from '@/utils/request'
 
+const ACCESS_URL = '/upload'
+
 export function pageUser(params) {
   return request.get('/user', { params })
 }
 
 export function getUser(id) {
-  return request.get(`/user/${id}`)
+  return request.get(`/user/${id}`).then(user => {
+    if (user && user.faceImageUrl) {
+      user.faceImageUrl = `${ACCESS_URL}${user.faceImageUrl}`
+    }
+    return user
+  })
 }
 
 export function addUser(data) {

@@ -78,6 +78,15 @@
           <el-descriptions :column="1" border size="small" style="margin-bottom: 20px">
             <el-descriptions-item label="姓名">{{ currentRow.name }}</el-descriptions-item>
             <el-descriptions-item label="登录名">{{ currentRow.loginName }}</el-descriptions-item>
+            <el-descriptions-item label="当前人脸">
+              <el-image
+                v-if="currentRow.faceImageUrl"
+                :src="currentRow.faceImageUrl"
+                fit="contain"
+                style="width: 80px; height: 80px; border-radius: 4px"
+              />
+              <span v-else style="color: #ccc">未注册</span>
+            </el-descriptions-item>
           </el-descriptions>
 
           <el-form-label>上传人脸照片</el-form-label>
@@ -207,7 +216,7 @@ async function handleRemoveFace(row) {
     ElMessage.success('人脸已删除')
     loadUsers()
   } catch (err) {
-    // 用户取消或不抛出异常
+    // 用户取消不提示
     if (err !== 'cancel') {
       ElMessage.error('删除失败: ' + (err.message || err))
     }

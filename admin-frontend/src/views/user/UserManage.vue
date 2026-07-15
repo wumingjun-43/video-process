@@ -110,10 +110,14 @@ const rules = {
 
 async function loadData() {
   try {
+    
     const data = await pageUser({ keyword: searchForm.keyword, page: pagination.page, size: pagination.size })
+    
     tableData.value = data.records
     pagination.total = data.total
-  } catch (e) { /* ignore */ }
+  } catch (e) { 
+    alert("报错了"+e)
+    }
 }
 
 function resetSearch() {
