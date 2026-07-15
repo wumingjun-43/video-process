@@ -1,7 +1,5 @@
 package com.niuwang.model.dto;
 
-import jakarta.validation.constraints.NotEmpty;
-import jakarta.validation.constraints.NotNull;
 import lombok.Data;
 import org.springframework.web.multipart.MultipartFile;
 
@@ -12,10 +10,17 @@ import org.springframework.web.multipart.MultipartFile;
 public class FaceRegisterDTO {
 
     /** 目标用户ID */
-    @NotNull(message = "用户ID不能为空")
     private Long userId;
 
     /** 人脸照片 */
-    @NotEmpty(message = "人脸照片不能为空")
-    private MultipartFile faceImage;
+    private MultipartFile image;
+
+    /** 兼容前端使用 faceImage 字段名 */
+    public MultipartFile getFaceImage() {
+        return image;
+    }
+
+    public void setFaceImage(MultipartFile faceImage) {
+        this.image = faceImage;
+    }
 }

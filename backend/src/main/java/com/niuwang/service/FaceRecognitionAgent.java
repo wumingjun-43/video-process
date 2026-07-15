@@ -5,9 +5,6 @@ import com.niuwang.mapper.UserMapper;
 import com.niuwang.model.entity.User;
 import com.niuwang.model.vo.FaceMatchResultVO;
 import lombok.extern.slf4j.Slf4j;
-import org.springframework.ai.document.Document;
-import org.springframework.ai.vectorstore.SearchRequest;
-import org.springframework.ai.vectorstore.VectorStore;
 import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.jdbc.core.JdbcTemplate;
@@ -15,23 +12,23 @@ import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 import org.springframework.web.multipart.MultipartFile;
 
+import java.io.*;
+import java.math.BigDecimal;
+import java.nio.file.Files;
+import java.sql.PreparedStatement;
+import java.sql.SQLException;
 import java.util.*;
+import java.util.stream.Collectors;
 
 /**
  * 人脸识别 Agent
  * 基于 insightface 提取 512 维人脸特征向量，存入 PostgreSQL pgvector
- *
- * 工作流程:
- * 1. 注册人脸: 提取特征向量 → 存入 pgvector vector_store 表
- * 2. 人脸匹配: 提取特征 → pgvector 向量搜索 → AI 多模态精排
- * 3. 人脸登录: 提取特征 → pgvector 向量搜索 → JWT 签发
  */
 @Slf4j
 @Service
 public class FaceRecognitionAgent {
 
     private final FaceEmbeddingService faceEmbeddingService;
-    private final VectorStore vectorStore;
     private final UserMapper userMapper;
     private final MatchRecordService matchRecordService;
     private final AiRecognitionService aiRecognitionService;
@@ -45,54 +42,64 @@ public class FaceRecognitionAgent {
 
     public FaceRecognitionAgent(
             FaceEmbeddingService faceEmbeddingService,
-            VectorStore vectorStore,
             UserMapper userMapper,
             MatchRecordService matchRecordService,
             AiRecognitionService aiRecognitionService,
             @Qualifier("postgresqlJdbcTemplate") JdbcTemplate postgresqlJdbcTemplate) {
         this.faceEmbeddingService = faceEmbeddingService;
-        this.vectorStore = vectorStore;
         this.userMapper = userMapper;
         this.matchRecordService = matchRecordService;
         this.aiRecognitionService = aiRecognitionService;
         this.postgresqlJdbcTemplate = postgresqlJdbcTemplate;
     }
 
-    // ==================== 注册人脸 ====================
-
-    /**
-     * 注册人脸: 提取特征向量并存入 pgvector
-     */
     @Transactional(rollbackFor = Exception.class)
-    public void registerFace(Long userId, MultipartFile faceImage) {
+    public void registerFace(Long userId, File faceFile, String faceUrl) {
         try {
             User user = userMapper.selectById(userId);
             if (user == null) {
                 throw new BusinessException("用户不存在");
             }
 
-            // 1. 保存人脸图片
-            String faceUrl = "/face/" + System.currentTimeMillis() + ".jpg";
-            saveImage(faceImage, faceUrl);
+            // 1. 提取 512 维人脸特征向量
+            float[] embedding = faceEmbeddingService.extractFaceEmbedding(faceFile);
+
+            // 2. 删除旧记录（如果有）
+            postgresqlJdbcTemplate.update(
+                    "DELETE FROM vector_store WHERE metadata->>'user_id' = ?",
+                    String.valueOf(userId));
+
+            // 3. 更新用户人脸图片路径（先更新 DB，再读新值）
             user.setFaceImageUrl(faceUrl);
             userMapper.updateById(user);
 
-            // 2. 提取人脸特征向量
-            float[] embedding = faceEmbeddingService.extractFaceEmbedding(faceImage);
+            // 4. 构建 metadata JSON 字符串（防止 JSON 注入）
+            String safeImageUrl = faceUrl.replace("\\", "\\\\").replace("\"", "\\\"");
+            String metadataJson = String.format(
+                    "{\"user_id\":%d,\"face_image_url\":\"%s\",\"type\":\"face\"}",
+                    userId, safeImageUrl);
 
-            // 3. 存入 pgvector — 先插入文档记录
-            Document doc = new Document("face:" + userId);
-            doc.getMetadata().put("user_id", userId);
-            doc.getMetadata().put("face_image_url", faceUrl);
-            doc.getMetadata().put("type", "face");
-            vectorStore.add(List.of(doc));
+            // 5. 使用 PreparedStatementCreator 显式设置 jsonb 和 vector 类型
+            String sql = "INSERT INTO vector_store (id, content, metadata, embedding) "
+                    + "VALUES (gen_random_uuid(), ?, ?, ?)";
+            postgresqlJdbcTemplate.update((java.sql.Connection conn) -> {
+                java.sql.PreparedStatement ps = conn.prepareStatement(sql);
+                ps.setString(1, "face:" + userId);
 
-            // 4. 将 embedding 写入 vector_store 表
-            String vecStr = faceEmbeddingService.toPgVectorString(embedding);
-            postgresqlJdbcTemplate.update(
-                    "UPDATE vector_store SET embedding = ?::vector WHERE id = ?",
-                    vecStr, doc.getId()
-            );
+                // metadata 需要设为 jsonb 类型
+                org.postgresql.util.PGobject pgMetadata = new org.postgresql.util.PGobject();
+                pgMetadata.setType("jsonb");
+                pgMetadata.setValue(metadataJson);
+                ps.setObject(2, pgMetadata);
+
+                // embedding 需要设为 vector 类型
+                org.postgresql.util.PGobject pgVector = new org.postgresql.util.PGobject();
+                pgVector.setType("vector");
+                pgVector.setValue(faceEmbeddingService.toPgVectorString(embedding));
+                ps.setObject(3, pgVector);
+
+                return ps;
+            });
 
             log.info("人脸注册成功: userId={}, embedding dim={}", userId, embedding.length);
 
@@ -104,77 +111,46 @@ public class FaceRecognitionAgent {
         }
     }
 
-    // ==================== 删除人脸 ====================
-
-    /**
-     * 删除人脸: 清理用户人脸图片和向量库记录
-     */
     @Transactional(rollbackFor = Exception.class)
     public void removeFace(Long userId) {
-        User user = userMapper.selectById(userId);
-        if (user == null) {
-            throw new BusinessException("用户不存在");
-        }
-
-        // 删除人脸图片
-        if (user.getFaceImageUrl() != null && !user.getFaceImageUrl().isEmpty()) {
-            String fullPath = uploadPath + user.getFaceImageUrl();
-            java.io.File file = new java.io.File(fullPath);
-            if (file.exists()) file.delete();
-        }
-        user.setFaceImageUrl(null);
-        userMapper.updateById(user);
-
-        // 删除 pgvector 中的向量记录
         postgresqlJdbcTemplate.update(
                 "DELETE FROM vector_store WHERE metadata->>'user_id' = ?",
-                String.valueOf(userId)
-        );
-
+                String.valueOf(userId));
         log.info("人脸已删除: userId={}", userId);
     }
 
-    // ==================== 人脸匹配 ====================
-
-    /**
-     * 人脸匹配: 完整匹配流程
-     * 1. 提取查询图像特征向量
-     * 2. pgvector 向量搜索 Top-K 候选
-     * 3. AI 多模态精排
-     */
     @Transactional(rollbackFor = Exception.class)
     public FaceMatchResultVO matchFace(MultipartFile image, int candidateCount, double confidenceThreshold) {
         try {
-            // Step 1: 提取查询图像的特征向量
+            // 1. 提取特征向量
             float[] queryVector = faceEmbeddingService.extractFaceEmbedding(image);
 
-            // Step 2: pgvector 向量搜索
-            String vecStr = faceEmbeddingService.toPgVectorString(queryVector);
-            String sql = """
-                    SELECT id, metadata, 1 - (embedding <=> ?::vector) AS similarity
-                    FROM vector_store
-                    WHERE embedding IS NOT NULL
-                      AND metadata->>'type' = 'face'
-                    ORDER BY embedding <=> ?::vector
-                    LIMIT ?""";
+            // 2. pgvector 向量搜索（使用 PGobject 显式绑定 vector 类型）
+            org.postgresql.util.PGobject queryVecObj = new org.postgresql.util.PGobject();
+            queryVecObj.setType("vector");
+            queryVecObj.setValue(faceEmbeddingService.toPgVectorString(queryVector));
 
-            List<Map<String, Object>> rows = postgresqlJdbcTemplate.queryForList(
-                    sql, vecStr, vecStr, candidateCount);
+            String sql = "SELECT id, metadata, 1 - (embedding <=> ?::vector) AS similarity "
+                    + "FROM vector_store WHERE embedding IS NOT NULL "
+                    + "AND metadata->>'type' = 'face' "
+                    + "ORDER BY embedding <=> ?::vector LIMIT ?";
+
+            List<Map<String, Object>> rows = postgresqlJdbcTemplate.queryForList(sql,
+                    new Object[]{queryVecObj, queryVecObj, candidateCount});
 
             if (rows.isEmpty()) {
                 FaceMatchResultVO result = new FaceMatchResultVO();
                 result.setAiAnalysis("系统中暂无注册人脸");
                 result.setIsMatch(false);
-                result.setConfidenceScore(java.math.BigDecimal.ZERO);
+                result.setConfidenceScore(BigDecimal.ZERO);
                 return result;
             }
 
-            // Step 3: 构建候选列表
+            // 3. 构建候选列表
             List<AiRecognitionService.FaceCandidate> faceCandidates = new ArrayList<>();
             for (Map<String, Object> row : rows) {
-                String docId = (String) row.get("id");
                 @SuppressWarnings("unchecked")
-                Map<String, Object> metadata = (Map<String, Object>) row.get("metadata");
+                Map<String, Object> metadata = parseMetadata(row.get("metadata"));
                 Long uid = Long.parseLong(metadata.get("user_id").toString());
                 String faceUrl = (String) metadata.get("face_image_url");
                 Double similarity = (Double) row.get("similarity");
@@ -183,23 +159,20 @@ public class FaceRecognitionAgent {
                 if (user == null) continue;
 
                 faceCandidates.add(new AiRecognitionService.FaceCandidate(
-                        uid,
-                        user.getName(),
-                        faceUrl,
-                        null,
-                        similarity
-                ));
+                        uid, user.getName(), faceUrl, null, similarity));
             }
 
-            // Step 4: AI 多模态精排
-            // 保存匹配图片
+            // 4. 保存匹配图片
             String matchImageUrl = "/face-match/" + System.currentTimeMillis() + ".jpg";
             try {
-                saveImage(image, matchImageUrl);
+                File dir = new File(uploadPath + matchImageUrl).getParentFile();
+                if (!dir.exists()) dir.mkdirs();
+                image.transferTo(new File(uploadPath + matchImageUrl));
             } catch (Exception e) {
                 // ignore
             }
 
+            // 5. AI 多模态精排
             FaceMatchResultVO result;
             if (!faceCandidates.isEmpty()) {
                 result = aiRecognitionService.matchFaceByAI(image, faceCandidates);
@@ -207,10 +180,10 @@ public class FaceRecognitionAgent {
                 result = new FaceMatchResultVO();
                 result.setAiAnalysis("未找到任何候选用户");
                 result.setIsMatch(false);
-                result.setConfidenceScore(java.math.BigDecimal.ZERO);
+                result.setConfidenceScore(BigDecimal.ZERO);
             }
 
-            // Step 5: 填充候选信息
+            // 6. 填充候选信息
             result.setImageUrl(accessUrl + matchImageUrl);
             if (result.getCandidates() == null || result.getCandidates().isEmpty()) {
                 result.setCandidates(faceCandidates.stream().map(c -> {
@@ -218,12 +191,12 @@ public class FaceRecognitionAgent {
                     info.setUserId(c.getUserId());
                     info.setUserName(c.getUserName());
                     info.setFaceImageUrl(accessUrl + c.getFaceImageUrl());
-                    info.setCosineSimilarity(java.math.BigDecimal.valueOf(c.getCosineSimilarity()));
+                    info.setCosineSimilarity(BigDecimal.valueOf(c.getCosineSimilarity()));
                     return info;
-                }).toList());
+                }).collect(Collectors.toList()));
             }
 
-            // Step 6: 补充用户详细信息
+            // 7. 补充用户详细信息
             if (result.getUserId() != null && result.getUserId() > 0) {
                 User matchedUser = userMapper.selectById(result.getUserId());
                 if (matchedUser != null) {
@@ -232,7 +205,7 @@ public class FaceRecognitionAgent {
                 }
             }
 
-            // Step 7: 保存匹配记录
+            // 8. 保存匹配记录
             matchRecordService.saveFaceMatchRecord(
                     result.getUserId() != null ? result.getUserId() : 0L,
                     matchImageUrl,
@@ -248,46 +221,76 @@ public class FaceRecognitionAgent {
         }
     }
 
-    /**
-     * 提取人脸特征向量（供 FaceAuthController 使用）
-     */
-    public float[] extractFaceEmbedding(MultipartFile image) {
-        return faceEmbeddingService.extractFaceEmbedding(image);
+    public float[] extractFaceEmbedding(File imageFile) {
+        try {
+            byte[] bytes = Files.readAllBytes(imageFile.toPath());
+            return faceEmbeddingService.extractFaceEmbedding(bytes);
+        } catch (Exception e) {
+            throw new BusinessException("人脸特征提取失败: " + e.getMessage());
+        }
     }
 
-    /**
-     * 根据用户ID查询用户（供 FaceAuthController 使用）
-     */
+    public float[] extractFaceEmbedding(MultipartFile image) {
+        try {
+            return faceEmbeddingService.extractFaceEmbedding(image);
+        } catch (Exception e) {
+            throw new BusinessException("人脸特征提取失败: " + e.getMessage());
+        }
+    }
+
     public User getUserById(Long userId) {
         return userMapper.selectById(userId);
     }
 
-    /**
-     * 搜索最相似的人脸（供 FaceAuthController 使用）
-     */
-    public Map<String, Object> searchNearestFace(float[] queryVector, int topK) {
-        String vecStr = faceEmbeddingService.toPgVectorString(queryVector);
-        String sql = """
-                SELECT id, metadata, 1 - (embedding <=> ?::vector) AS similarity
-                FROM vector_store
-                WHERE embedding IS NOT NULL
-                  AND metadata->>'type' = 'face'
-                ORDER BY embedding <=> ?::vector
-                LIMIT 1""";
+    public Map<String, Object> searchNearestFace(float[] queryVector) {
+        try {
+            org.postgresql.util.PGobject queryVecObj = new org.postgresql.util.PGobject();
+            queryVecObj.setType("vector");
+            queryVecObj.setValue(faceEmbeddingService.toPgVectorString(queryVector));
 
-        List<Map<String, Object>> rows = postgresqlJdbcTemplate.queryForList(sql, vecStr, vecStr);
-        if (rows.isEmpty()) {
-            return null;
+            String sql = "SELECT id, metadata, 1 - (embedding <=> ?::vector) AS similarity "
+                    + "FROM vector_store WHERE embedding IS NOT NULL "
+                    + "AND metadata->>'type' = 'face' "
+                    + "ORDER BY embedding <=> ?::vector LIMIT 1";
+
+            List<Map<String, Object>> rows = postgresqlJdbcTemplate.queryForList(sql,
+                    new Object[]{queryVecObj, queryVecObj});
+            if (rows.isEmpty()) return null;
+
+            // 解析 metadata 列（PostgreSQL 返回为 PGobject，需转为 Map）
+            Map<String, Object> row = rows.get(0);
+            Object metadataObj = row.get("metadata");
+            if (metadataObj != null && !(metadataObj instanceof Map)) {
+                row = new LinkedHashMap<>(row);
+                row.put("metadata", parseMetadata(metadataObj));
+            }
+            return row;
+        } catch (SQLException e) {
+            throw new BusinessException("人脸向量搜索失败: " + e.getMessage());
         }
-        return rows.get(0);
     }
 
     /**
-     * 保存人脸图片到本地磁盘
+     * 解析 PostgreSQL 返回的 jsonb 类型为 Map
+     * pgvector JDBC 驱动返回 jsonb 列为 org.postgresql.util.PGobject
      */
-    private void saveImage(MultipartFile image, String faceUrl) throws Exception {
-        java.io.File dir = new java.io.File(uploadPath + faceUrl).getParentFile();
-        if (!dir.exists()) dir.mkdirs();
-        image.transferTo(new java.io.File(uploadPath + faceUrl));
+    @SuppressWarnings("unchecked")
+    private Map<String, Object> parseMetadata(Object metadataObj) {
+        if (metadataObj instanceof Map) {
+            return (Map<String, Object>) metadataObj;
+        }
+        // PostgreSQL jsonb 返回为 PGobject，需要手动解析
+        if (metadataObj != null) {
+            String json = metadataObj.toString();
+            try {
+                com.fasterxml.jackson.databind.ObjectMapper mapper =
+                        new com.fasterxml.jackson.databind.ObjectMapper();
+                return mapper.readValue(json, Map.class);
+            } catch (Exception e) {
+                log.warn("解析 metadata 失败: {}", json, e);
+                return Collections.emptyMap();
+            }
+        }
+        return Collections.emptyMap();
     }
 }

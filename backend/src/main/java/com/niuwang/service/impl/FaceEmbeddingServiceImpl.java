@@ -7,16 +7,13 @@ import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Service;
 import org.springframework.web.multipart.MultipartFile;
 
-import java.io.BufferedReader;
-import java.io.InputStreamReader;
+import java.io.ByteArrayOutputStream;
+import java.io.File;
+import java.io.FileInputStream;
+import java.io.InputStream;
 import java.util.Base64;
-import java.util.Map;
 import java.util.concurrent.TimeUnit;
 
-/**
- * 人脸特征提取服务实现
- * 通过 subprocess 调用 Python insightface 脚本提取 512 维人脸特征向量
- */
 @Slf4j
 @Service
 public class FaceEmbeddingServiceImpl implements FaceEmbeddingService {
@@ -27,109 +24,46 @@ public class FaceEmbeddingServiceImpl implements FaceEmbeddingService {
     @Value("${face.python-command:python}")
     private String pythonCommand;
 
-    /**
-     * 从人脸图片提取 512 维特征向量
-     */
     @Override
     public float[] extractFaceEmbedding(MultipartFile image) {
         try {
-            // 1. 图片转 base64
-            byte[] imageBytes = image.getBytes();
-            String base64Image = Base64.getEncoder().encodeToString(imageBytes);
-
-            // 2. 构建 Python 命令
-            String scriptPath = resolveScriptPath();
-            ProcessBuilder pb = new ProcessBuilder(
-                    pythonCommand, scriptPath
-            );
-            pb.redirectErrorStream(true);
-            Process process = pb.start();
-
-            // 3. 写入 JSON 输入
-            String jsonInput = String.format(
-                    "{\"image\":\"%s\",\"action\":\"extract\"}",
-                    base64Image
-            );
-            process.getOutputStream().write(jsonInput.getBytes("UTF-8"));
-            process.getOutputStream().flush();
-            process.getOutputStream().close();
-
-            // 4. 读取输出
-            String output = readOutput(process);
-
-            // 5. 解析 JSON 结果
-            Map<String, Object> result = parseJson(output);
-
-            if (result.containsKey("error")) {
-                throw new BusinessException((String) result.get("error"));
-            }
-
-            @SuppressWarnings("unchecked")
-            java.util.List<Double> embList = (java.util.List<Double>) result.get("embedding");
-            if (embList == null) {
-                throw new BusinessException("未能提取到人脸特征向量");
-            }
-
-            float[] embedding = new float[embList.size()];
-            for (int i = 0; i < embList.size(); i++) {
-                embedding[i] = embList.get(i).floatValue();
-            }
-
-            log.debug("人脸特征提取完成，维度: {}", embedding.length);
-            return embedding;
-
-        } catch (BusinessException e) {
-            throw e;
+            byte[] bytes = image.getBytes();
+            return extractFromBase64(Base64.getEncoder().encodeToString(bytes));
         } catch (Exception e) {
-            log.error("人脸特征提取失败: {}", e.getMessage(), e);
             throw new BusinessException("人脸特征提取失败: " + e.getMessage());
         }
     }
 
-    /**
-     * 比较两张人脸图片的余弦相似度
-     */
+    @Override
+    public float[] extractFaceEmbedding(File imageFile) {
+        try {
+            byte[] bytes = readFileToBytes(imageFile);
+            return extractFromBase64(Base64.getEncoder().encodeToString(bytes));
+        } catch (Exception e) {
+            throw new BusinessException("人脸特征提取失败: " + e.getMessage());
+        }
+    }
+
+    @Override
+    public float[] extractFaceEmbedding(byte[] imageBytes) {
+        try {
+            return extractFromBase64(Base64.getEncoder().encodeToString(imageBytes));
+        } catch (Exception e) {
+            throw new BusinessException("人脸特征提取失败: " + e.getMessage());
+        }
+    }
+
     @Override
     public double compareFaces(MultipartFile image1, MultipartFile image2) {
         try {
-            String base64Image1 = Base64.getEncoder().encodeToString(image1.getBytes());
-            String base64Image2 = Base64.getEncoder().encodeToString(image2.getBytes());
-
-            String scriptPath = resolveScriptPath();
-            ProcessBuilder pb = new ProcessBuilder(
-                    pythonCommand, scriptPath
-            );
-            pb.redirectErrorStream(true);
-            Process process = pb.start();
-
-            String jsonInput = String.format(
-                    "{\"image\":\"%s\",\"image2\":\"%s\",\"action\":\"compare\"}",
-                    base64Image1, base64Image2
-            );
-            process.getOutputStream().write(jsonInput.getBytes("UTF-8"));
-            process.getOutputStream().flush();
-            process.getOutputStream().close();
-
-            String output = readOutput(process);
-            Map<String, Object> result = parseJson(output);
-
-            if (result.containsKey("error")) {
-                throw new BusinessException((String) result.get("error"));
-            }
-
-            return (double) result.get("similarity");
-
-        } catch (BusinessException e) {
-            throw e;
+            String b64_1 = Base64.getEncoder().encodeToString(image1.getBytes());
+            String b64_2 = Base64.getEncoder().encodeToString(image2.getBytes());
+            return extractFromBase64Compare(b64_1, b64_2);
         } catch (Exception e) {
-            log.error("人脸相似度比较失败: {}", e.getMessage(), e);
             throw new BusinessException("人脸相似度比较失败: " + e.getMessage());
         }
     }
 
-    /**
-     * 将 float[] 转为 pgvector 格式字符串
-     */
     @Override
     public String toPgVectorString(float[] embedding) {
         StringBuilder sb = new StringBuilder("[");
@@ -141,33 +75,95 @@ public class FaceEmbeddingServiceImpl implements FaceEmbeddingService {
         return sb.toString();
     }
 
-    /**
-     * 解析 Python 输出的 JSON
-     */
-    @SuppressWarnings("unchecked")
-    private Map<String, Object> parseJson(String json) {
+    private float[] extractFromBase64(String base64Image) throws Exception {
+        ProcessBuilder pb = new ProcessBuilder(pythonCommand, resolveScriptPath());
+        // Don't redirect error stream — keep stdout clean for JSON
+        Process process = pb.start();
+
+        String jsonInput = String.format("{\"image\":\"%s\",\"action\":\"extract\"}", base64Image);
+        process.getOutputStream().write(jsonInput.getBytes("UTF-8"));
+        process.getOutputStream().flush();
+        process.getOutputStream().close();
+
+        String output = readStdout(process);
+        // Drain stderr silently
+        try (java.io.BufferedReader errReader = new java.io.BufferedReader(
+                new java.io.InputStreamReader(process.getErrorStream(), "UTF-8"))) {
+            while (errReader.readLine() != null) {}
+        }
+
+        return parseEmbedding(output);
+    }
+
+    private double extractFromBase64Compare(String b64_1, String b64_2) throws Exception {
+        ProcessBuilder pb = new ProcessBuilder(pythonCommand, resolveScriptPath());
+        Process process = pb.start();
+
+        String jsonInput = String.format(
+                "{\"image\":\"%s\",\"image2\":\"%s\",\"action\":\"compare\"}", b64_1, b64_2);
+        process.getOutputStream().write(jsonInput.getBytes("UTF-8"));
+        process.getOutputStream().flush();
+        process.getOutputStream().close();
+
+        String output = readStdout(process);
+        try (java.io.BufferedReader errReader = new java.io.BufferedReader(
+                new java.io.InputStreamReader(process.getErrorStream(), "UTF-8"))) {
+            while (errReader.readLine() != null) {}
+        }
+
+        return parseSimilarity(output);
+    }
+
+    private float[] parseEmbedding(String json) {
         try {
             com.fasterxml.jackson.databind.ObjectMapper mapper = new com.fasterxml.jackson.databind.ObjectMapper();
-            return mapper.readValue(json, Map.class);
+            java.util.Map<String, Object> data = mapper.readValue(json, java.util.Map.class);
+
+            if (data.containsKey("error")) {
+                throw new BusinessException((String) data.get("error"));
+            }
+
+            @SuppressWarnings("unchecked")
+            java.util.List<Double> embList = (java.util.List<Double>) data.get("embedding");
+            if (embList == null) {
+                throw new BusinessException("未能提取到人脸特征向量");
+            }
+
+            float[] embedding = new float[embList.size()];
+            for (int i = 0; i < embList.size(); i++) {
+                embedding[i] = embList.get(i).floatValue();
+            }
+            return embedding;
         } catch (Exception e) {
             throw new BusinessException("解析 Python 输出失败: " + e.getMessage());
         }
     }
 
-    /**
-     * 读取 subprocess 输出
-     */
-    private String readOutput(Process process) throws Exception {
+    private double parseSimilarity(String json) {
+        try {
+            com.fasterxml.jackson.databind.ObjectMapper mapper = new com.fasterxml.jackson.databind.ObjectMapper();
+            java.util.Map<String, Object> data = mapper.readValue(json, java.util.Map.class);
+
+            if (data.containsKey("error")) {
+                throw new BusinessException((String) data.get("error"));
+            }
+
+            return (double) data.get("similarity");
+        } catch (Exception e) {
+            throw new BusinessException("解析 Python 输出失败: " + e.getMessage());
+        }
+    }
+
+    private String readStdout(Process process) throws Exception {
         StringBuilder sb = new StringBuilder();
-        try (BufferedReader reader = new BufferedReader(
-                new InputStreamReader(process.getInputStream(), "UTF-8"))) {
+        try (java.io.BufferedReader reader = new java.io.BufferedReader(
+                new java.io.InputStreamReader(process.getInputStream(), "UTF-8"))) {
             String line;
             while ((line = reader.readLine()) != null) {
                 sb.append(line);
             }
         }
 
-        // 等待进程完成（超时 30 秒）
         boolean completed = process.waitFor(30, TimeUnit.SECONDS);
         if (!completed) {
             process.destroyForcibly();
@@ -181,20 +177,15 @@ public class FaceEmbeddingServiceImpl implements FaceEmbeddingService {
         return sb.toString().trim();
     }
 
-    /**
-     * 解析 Python 脚本路径
-     */
     private String resolveScriptPath() {
-        // classpath: 前缀表示从 resources 中读取
         if (pythonScriptPath.startsWith("classpath:")) {
             String relativePath = pythonScriptPath.substring("classpath:".length());
-            // 从 classpath 加载到临时文件
             try {
-                java.io.InputStream is = getClass().getClassLoader().getResourceAsStream(relativePath);
+                InputStream is = getClass().getClassLoader().getResourceAsStream(relativePath);
                 if (is == null) {
                     throw new BusinessException("找不到 Python 脚本: " + relativePath);
                 }
-                java.io.File tempScript = java.io.File.createTempFile("face_extract", ".py");
+                File tempScript = File.createTempFile("face_extract", ".py");
                 tempScript.deleteOnExit();
                 java.nio.file.Files.copy(is, tempScript.toPath(),
                         java.nio.file.StandardCopyOption.REPLACE_EXISTING);
@@ -204,5 +195,17 @@ public class FaceEmbeddingServiceImpl implements FaceEmbeddingService {
             }
         }
         return pythonScriptPath;
+    }
+
+    private byte[] readFileToBytes(File file) throws Exception {
+        ByteArrayOutputStream bos = new ByteArrayOutputStream();
+        try (FileInputStream fis = new FileInputStream(file)) {
+            byte[] buffer = new byte[4096];
+            int n;
+            while ((n = fis.read(buffer)) > 0) {
+                bos.write(buffer, 0, n);
+            }
+        }
+        return bos.toByteArray();
     }
 }

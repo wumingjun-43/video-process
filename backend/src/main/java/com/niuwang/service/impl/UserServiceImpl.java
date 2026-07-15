@@ -22,6 +22,7 @@ import org.springframework.transaction.annotation.Transactional;
 import org.springframework.web.multipart.MultipartFile;
 
 import java.io.File;
+import java.io.IOException;
 import java.util.List;
 import java.util.stream.Collectors;
 
@@ -126,17 +127,18 @@ public class UserServiceImpl extends ServiceImpl<UserMapper, User> implements Us
             throw new BusinessException("用户不存在");
         }
 
-        // 1. 保存人脸图片
+        // 1. 保存新人脸图片到固定路径
         String faceUrl = "/face/" + System.currentTimeMillis() + ".jpg";
+        File destFile = new File(uploadPath + faceUrl);
         try {
-            File dir = new File(uploadPath + faceUrl).getParentFile();
+            File dir = destFile.getParentFile();
             if (!dir.exists()) dir.mkdirs();
-            faceImage.transferTo(new File(uploadPath + faceUrl));
+            faceImage.transferTo(destFile);
         } catch (Exception e) {
             throw new BusinessException("人脸图片保存失败: " + e.getMessage());
         }
 
-        // 2. 删除旧的人脸图片(如果有)
+        // 2. 删除旧的的人脸图片(如果有)
         if (user.getFaceImageUrl() != null && !user.getFaceImageUrl().isEmpty()) {
             File oldFile = new File(uploadPath + user.getFaceImageUrl());
             if (oldFile.exists()) oldFile.delete();
@@ -146,8 +148,8 @@ public class UserServiceImpl extends ServiceImpl<UserMapper, User> implements Us
         user.setFaceImageUrl(faceUrl);
         updateById(user);
 
-        // 4. 委托给 Agent 处理特征提取和向量入库
-        faceRecognitionAgent.registerFace(userId, faceImage);
+        // 4. 重新读取文件传给 Agent（transferTo 后临时文件可能已被删除）
+        faceRecognitionAgent.registerFace(userId, destFile, faceUrl);
     }
 
     @Override

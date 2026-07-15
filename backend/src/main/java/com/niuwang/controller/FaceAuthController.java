@@ -1,16 +1,14 @@
 package com.niuwang.controller;
 
 import com.niuwang.common.response.Result;
-import com.niuwang.model.vo.LoginVO;
 import com.niuwang.security.JwtUtil;
 import com.niuwang.service.FaceRecognitionAgent;
 import lombok.RequiredArgsConstructor;
-import org.springframework.jdbc.core.JdbcTemplate;
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.web.bind.annotation.*;
 import org.springframework.web.multipart.MultipartFile;
 
 import java.util.HashMap;
-import java.util.List;
 import java.util.Map;
 
 /**
@@ -25,24 +23,26 @@ public class FaceAuthController {
 
     private final FaceRecognitionAgent faceRecognitionAgent;
     private final JwtUtil jwtUtil;
-    private final JdbcTemplate postgresqlJdbcTemplate;
 
-    /**
-     * 人脸登录
-     * 流程: 提取特征 → pgvector 向量搜索 → 签发 JWT
-     */
+    @Value("${face.matching.confidence-threshold:0.75}")
+    private double defaultConfidenceThreshold;
+
     @PostMapping("/face-login")
-    public Result<Map<String, Object>> faceLogin(@RequestParam("image") MultipartFile image) {
+    public Result<Map<String, Object>> faceLogin(
+            @RequestParam("image") MultipartFile image,
+            @RequestParam(value = "threshold", required = false) Double threshold) {
         if (image.isEmpty()) {
             return Result.error(400, "请上传人脸照片");
         }
+
+        double confThreshold = (threshold != null && threshold > 0) ? threshold : defaultConfidenceThreshold;
 
         try {
             // Step 1: 提取人脸特征向量
             float[] queryVector = faceRecognitionAgent.extractFaceEmbedding(image);
 
             // Step 2: 搜索最相似的人脸
-            Map<String, Object> searchResult = faceRecognitionAgent.searchNearestFace(queryVector, 1);
+            Map<String, Object> searchResult = faceRecognitionAgent.searchNearestFace(queryVector);
 
             if (searchResult == null) {
                 return Result.error(401, "未识别到已注册人脸，请联系管理员注册");
@@ -55,8 +55,8 @@ public class FaceAuthController {
             Double similarity = (Double) searchResult.get("similarity");
 
             // 检查相似度阈值
-            if (similarity < 0.75) {
-                return Result.error(401, "人脸相似度不足，请重试或改用密码登录");
+            if (similarity < confThreshold) {
+                return Result.error(401, String.format("人脸相似度不足(%.2f < %.2f)，请重试或改用密码登录", similarity, confThreshold));
             }
 
             // Step 4: 查询用户并生成 JWT

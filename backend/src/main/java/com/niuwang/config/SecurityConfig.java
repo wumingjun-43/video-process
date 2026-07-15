@@ -60,7 +60,14 @@ public class SecurityConfig {
             .sessionManagement(session -> session.sessionCreationPolicy(SessionCreationPolicy.STATELESS))
             .authorizeHttpRequests(auth -> auth
                 // 不需要认证的公开接口
-                .requestMatchers("/auth/login", "/auth/logout", "/auth/face-login", "/upload/**", "/doc.html", "/webjars/**", "/swagger-resources/**", "/v3/api-docs/**", "/druid/**", "/user", "/user/**", "/face/**").permitAll()
+                .requestMatchers("/auth/login", "/auth/logout", "/auth/face-login", "/upload/**", "/doc.html", "/webjars/**", "/swagger-resources/**", "/v3/api-docs/**", "/druid/**").permitAll()
+                // 人脸匹配和注册需要认证（防止未授权访问）
+                .requestMatchers("/face/match").authenticated()
+                .requestMatchers("/face/register").authenticated()
+                .requestMatchers("/face/users").authenticated()
+                // 用户管理需要认证
+                .requestMatchers("/user").authenticated()
+                .requestMatchers("/user/**").authenticated()
                 // 其他接口需要认证
                 .anyRequest().authenticated()
             )
