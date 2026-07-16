@@ -438,10 +438,10 @@ public class AiRecognitionServiceImpl implements AiRecognitionService {
     private float[] parseFloatArray(String text) {
         String cleaned = text.replaceAll("[^0-9.,\\-]", "").trim();
         if (cleaned.isEmpty()) {
-            return new float[512]; // 默认零向量
+            return new float[1024]; // 默认零向量
         }
         String[] parts = cleaned.split(",");
-        float[] vector = new float[Math.min(parts.length, 512)];
+        float[] vector = new float[Math.min(parts.length, 1024)];
         for (int i = 0; i < vector.length; i++) {
             try {
                 vector[i] = Float.parseFloat(parts[i].trim());

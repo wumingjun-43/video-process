@@ -91,14 +91,16 @@ spring:
     default-property-inclusion: non_null
 
   # --- Spring AI Alibaba (DashScope) 配置 ---
-  ai:
-    dashscope:
-      api-key: sk-ws-H.RPLHMHY.C2m3.MEUCICbhNvXPok3Mp-HXri7_FRXD8lmZyr5j-oEBuFPURsAcAiEAkH4Z8mmZpbov7ux_Kl0Y5tDY8MOtkDM5daS0e8rOiwY
-      chat:
-        options:
-          model: qwen-vl-max
-          temperature: 0.3
-          max-tokens: 2048
+#  ai:
+#    dashscope:
+#      api-key: sk-ws-H.RPLHMHY.C2m3.MEUCICbhNvXPok3Mp-HXri7_FRXD8lmZyr5j-oEBuFPURsAcAiEAkH4Z8mmZpbov7ux_Kl0Y5tDY8MOtkDM5daS0e8rOiwY
+#      base-url: https://dashscope.aliyuncs.com
+#      chat:
+#        api-key: sk-ws-H.RPLHMHY.C2m3.MEUCICbhNvXPok3Mp-HXri7_FRXD8lmZyr5j-oEBuFPURsAcAiEAkH4Z8mmZpbov7ux_Kl0Y5tDY8MOtkDM5daS0e8rOiwY
+#        options:
+#          model: qwen-vl-max
+#          temperature: 0.3
+#          max-tokens: 2048
 
 # =====================================================
 # MyBatis-Plus 配置
@@ -156,6 +158,14 @@ face:
   matching:
     candidate-count: 5
     confidence-threshold: 0.75
+
+# =====================================================
+# RAG 检索配置
+# =====================================================
+rag:
+  retrieval:
+    top-k: 5
+    max-chunk-size: 800
 
 # =====================================================
 # 日志配置

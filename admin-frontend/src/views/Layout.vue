@@ -47,6 +47,10 @@
           <el-icon><Picture /></el-icon>
           <span>人脸匹配</span>
         </el-menu-item>
+        <el-menu-item index="/chat">
+          <el-icon><ChatDotRound /></el-icon>
+          <span>智能对话</span>
+        </el-menu-item>
       </el-menu>
     </el-aside>
 

@@ -74,6 +74,12 @@ const routes = [
         component: () => import('@/views/face/FaceMatch.vue'),
         meta: { title: '人脸匹配', icon: 'Picture' },
       },
+      {
+        path: 'chat',
+        name: 'SmartChat',
+        component: () => import('@/views/chat/Chat.vue'),
+        meta: { title: '智能对话', icon: 'ChatDotRound' },
+      },
     ],
   },
 ]

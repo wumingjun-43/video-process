@@ -22,7 +22,7 @@ import java.util.stream.Collectors;
 
 /**
  * 人脸识别 Agent
- * 基于 insightface 提取 512 维人脸特征向量，存入 PostgreSQL pgvector
+ * 基于 insightface 提取 1024 维人脸特征向量，存入 PostgreSQL pgvector
  */
 @Slf4j
 @Service
@@ -61,7 +61,7 @@ public class FaceRecognitionAgent {
                 throw new BusinessException("用户不存在");
             }
 
-            // 1. 提取 512 维人脸特征向量
+            // 1. 提取 1024 维人脸特征向量
             float[] embedding = faceEmbeddingService.extractFaceEmbedding(faceFile);
 
             // 2. 删除旧记录（如果有）

@@ -22,8 +22,8 @@ import javax.sql.DataSource;
 @Configuration
 public class SpringAiVectorConfig {
 
-    /** 向量维度: 512 (insightface buffalo_l 模型输出) */
-    private static final int VECTOR_DIMENSION = 512;
+    /** 向量维度: 1024 (DashScope embedding 模型输出) */
+    private static final int VECTOR_DIMENSION = 1024;
 
     /**
      * PostgreSQL JdbcTemplate
@@ -40,7 +40,7 @@ public class SpringAiVectorConfig {
 
     /**
      * 使用 pgvector 创建向量存储 Bean
-     * 自动建表: vector_store, 列: embedding vector(512)
+     * 自动建表: vector_store, 列: embedding vector(1024)
      */
     @Bean
     public VectorStore vectorStore(

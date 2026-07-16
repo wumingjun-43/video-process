@@ -2,6 +2,7 @@ package com.niuwang.common.exception;
 
 import com.niuwang.common.response.Result;
 import org.springframework.security.access.AccessDeniedException;
+import org.springframework.security.authorization.AuthorizationDeniedException;
 import org.springframework.validation.BindException;
 import org.springframework.web.bind.MethodArgumentNotValidException;
 import org.springframework.web.bind.annotation.ExceptionHandler;
@@ -39,6 +40,11 @@ public class GlobalExceptionHandler {
 
     @ExceptionHandler(AccessDeniedException.class)
     public Result<?> handleAccessDenied(AccessDeniedException e) {
+        return Result.error(403, "权限不足");
+    }
+
+    @ExceptionHandler(AuthorizationDeniedException.class)
+    public Result<?> handleAuthorizationDenied(AuthorizationDeniedException e) {
         return Result.error(403, "权限不足");
     }
 

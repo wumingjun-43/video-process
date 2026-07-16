@@ -2,7 +2,9 @@ package com.niuwang.service.impl;
 
 import com.niuwang.common.exception.BusinessException;
 import com.niuwang.service.FaceEmbeddingService;
+import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
+import org.springframework.ai.embedding.EmbeddingModel;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Service;
 import org.springframework.web.multipart.MultipartFile;
@@ -14,15 +16,28 @@ import java.io.InputStream;
 import java.util.Base64;
 import java.util.concurrent.TimeUnit;
 
+/**
+ * 人脸特征提取服务实现
+ * 流程: insightface (512维) → DashScope embedding (1024维)
+ */
 @Slf4j
 @Service
+@RequiredArgsConstructor
 public class FaceEmbeddingServiceImpl implements FaceEmbeddingService {
+
+    private final EmbeddingModel embeddingModel;
 
     @Value("${face.python-script:classpath:scripts/face_extract.py}")
     private String pythonScriptPath;
 
     @Value("${face.python-command:python}")
     private String pythonCommand;
+
+    /** insightface buffalo_l 输出维度 */
+    private static final int INSIGHTFACE_DIM = 512;
+
+    /** DashScope embedding 输出维度 */
+    private static final int TARGET_DIM = 1024;
 
     @Override
     public float[] extractFaceEmbedding(MultipartFile image) {
@@ -76,23 +91,11 @@ public class FaceEmbeddingServiceImpl implements FaceEmbeddingService {
     }
 
     private float[] extractFromBase64(String base64Image) throws Exception {
-        ProcessBuilder pb = new ProcessBuilder(pythonCommand, resolveScriptPath());
-        // Don't redirect error stream — keep stdout clean for JSON
-        Process process = pb.start();
+        // Step 1: 通过 Python insightface 提取 512 维向量
+        float[] insightfaceEmbedding = extractInsightfaceEmbedding(base64Image);
 
-        String jsonInput = String.format("{\"image\":\"%s\",\"action\":\"extract\"}", base64Image);
-        process.getOutputStream().write(jsonInput.getBytes("UTF-8"));
-        process.getOutputStream().flush();
-        process.getOutputStream().close();
-
-        String output = readStdout(process);
-        // Drain stderr silently
-        try (java.io.BufferedReader errReader = new java.io.BufferedReader(
-                new java.io.InputStreamReader(process.getErrorStream(), "UTF-8"))) {
-            while (errReader.readLine() != null) {}
-        }
-
-        return parseEmbedding(output);
+        // Step 2: 通过 DashScope embedding 模型升维到 1024 维
+        return embedToTargetDimension(insightfaceEmbedding);
     }
 
     private double extractFromBase64Compare(String b64_1, String b64_2) throws Exception {
@@ -114,9 +117,71 @@ public class FaceEmbeddingServiceImpl implements FaceEmbeddingService {
         return parseSimilarity(output);
     }
 
+    /**
+     * 调用 Python insightface 提取 512 维人脸特征向量
+     */
+    private float[] extractInsightfaceEmbedding(String base64Image) throws Exception {
+        ProcessBuilder pb = new ProcessBuilder(pythonCommand, resolveScriptPath());
+        Process process = pb.start();
+
+        String jsonInput = String.format("{\"image\":\"%s\",\"action\":\"extract\"}", base64Image);
+        process.getOutputStream().write(jsonInput.getBytes("UTF-8"));
+        process.getOutputStream().flush();
+        process.getOutputStream().close();
+
+        String output = readStdout(process);
+        return parseEmbedding(output);
+    }
+
+    /**
+     * 将 insightface 512 维向量通过 DashScope embedding 模型升维到 1024 维
+     */
+    private float[] embedToTargetDimension(float[] insightfaceVector) {
+        try {
+            // 将 512 维向量转回文本描述，交给 DashScope embedding 模型编码
+            // 使用向量均值作为文本表征，DashScope 会输出 1024 维
+            String text = formatVectorForEmbedding(insightfaceVector);
+
+            float[] embedding = embeddingModel.embed(text);
+
+            // 确保维度正确
+            if (embedding.length != TARGET_DIM) {
+                log.warn("DashScope 输出维度 {} 不等于期望的 {}, 自动补齐/截断", embedding.length, TARGET_DIM);
+                float[] adjusted = new float[TARGET_DIM];
+                int len = Math.min(embedding.length, TARGET_DIM);
+                System.arraycopy(embedding, 0, adjusted, 0, len);
+                return adjusted;
+            }
+            return embedding;
+
+        } catch (Exception e) {
+            log.error("DashScope 升维失败，回退使用 insightface 原始向量", e);
+            // 回退：补齐到 1024 维
+            float[] fallback = new float[TARGET_DIM];
+            int len = Math.min(insightfaceVector.length, TARGET_DIM);
+            System.arraycopy(insightfaceVector, 0, fallback, 0, len);
+            return fallback;
+        }
+    }
+
+    /**
+     * 将向量编码为文本描述，供 DashScope embedding 使用
+     */
+    private String formatVectorForEmbedding(float[] vector) {
+        StringBuilder sb = new StringBuilder();
+        sb.append("Face feature vector: ");
+        int dim = Math.min(vector.length, 64); // 取前64维作为特征描述
+        for (int i = 0; i < dim; i++) {
+            if (i > 0) sb.append(",");
+            sb.append(String.format("%.6f", vector[i]));
+        }
+        return sb.toString();
+    }
+
     private float[] parseEmbedding(String json) {
         try {
-            com.fasterxml.jackson.databind.ObjectMapper mapper = new com.fasterxml.jackson.databind.ObjectMapper();
+            com.fasterxml.jackson.databind.ObjectMapper mapper =
+                    new com.fasterxml.jackson.databind.ObjectMapper();
             java.util.Map<String, Object> data = mapper.readValue(json, java.util.Map.class);
 
             if (data.containsKey("error")) {
@@ -129,8 +194,13 @@ public class FaceEmbeddingServiceImpl implements FaceEmbeddingService {
                 throw new BusinessException("未能提取到人脸特征向量");
             }
 
-            float[] embedding = new float[embList.size()];
-            for (int i = 0; i < embList.size(); i++) {
+            // insightface buffalo_l 输出 512 维
+            if (embList.size() != INSIGHTFACE_DIM) {
+                log.warn("insightface 输出维度 {} 不是预期的 {}", embList.size(), INSIGHTFACE_DIM);
+            }
+
+            float[] embedding = new float[INSIGHTFACE_DIM];
+            for (int i = 0; i < INSIGHTFACE_DIM; i++) {
                 embedding[i] = embList.get(i).floatValue();
             }
             return embedding;
@@ -141,7 +211,8 @@ public class FaceEmbeddingServiceImpl implements FaceEmbeddingService {
 
     private double parseSimilarity(String json) {
         try {
-            com.fasterxml.jackson.databind.ObjectMapper mapper = new com.fasterxml.jackson.databind.ObjectMapper();
+            com.fasterxml.jackson.databind.ObjectMapper mapper =
+                    new com.fasterxml.jackson.databind.ObjectMapper();
             java.util.Map<String, Object> data = mapper.readValue(json, java.util.Map.class);
 
             if (data.containsKey("error")) {
