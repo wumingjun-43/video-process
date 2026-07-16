@@ -103,7 +103,7 @@
 </template>
 
 <script setup>
-import { ref, nextTick, onMounted } from 'vue'
+import { ref, nextTick, onMounted, reactive } from 'vue'
 import { ElMessage } from 'element-plus'
 import { ChatDotRound, User, Refresh } from '@element-plus/icons-vue'
 import { getKnowledgeList } from '@/api/chat'
@@ -160,14 +160,14 @@ async function handleSend() {
   messages.value.push(userMsg)
   scrollToBottom()
 
-  // 添加 AI 流式消息
-  const aiMsg = {
+  // 添加 AI 流式消息（用 reactive 包裹确保嵌套属性变更能触发响应式更新）
+  const aiMsg = reactive({
     role: 'ai',
     content: '',
     time: getTime(),
     loading: true,
     streamBuffer: '', // 流式缓冲
-  }
+  })
   messages.value.push(aiMsg)
   scrollToBottom()
 
@@ -198,42 +198,34 @@ async function handleSend() {
       throw new Error(`HTTP ${response.status}: ${errorText}`)
     }
 
+    // 打印响应头，方便排查 SSE 格式问题
+    console.log('[SSE] Content-Type:', response.headers.get('Content-Type'))
+    console.log('[SSE] Transfer-Encoding:', response.headers.get('Transfer-Encoding'))
+
     const reader = response.body.getReader()
     const decoder = new TextDecoder()
     let fullAnswer = ''
-    let pending = '' // 缓冲区，防止中文被截断
 
     while (true) {
       const { done, value } = await reader.read()
       if (done) break
 
-      // 用 stream: false 确保完整解码多字节字符
       const text = decoder.decode(value, { stream: false })
-      pending += text
-
-      // 按 \n\n 分割 SSE 事件（每个事件以空行结束）
-      const events = pending.split('\n\n')
-      // 最后一个元素可能是不完整的，保留到下次循环
-      pending = events.pop() || ''
-
-      for (const event of events) {
-        const lines = event.split('\n')
-        for (const line of lines) {
-          if (line.startsWith('data: ')) {
-            fullAnswer += line.slice(6)
-            aiMsg.content = fullAnswer
-            scrollToBottom()
-          }
-        }
+      if (text.trim()) {
+        console.log('[SSE] chunk:', JSON.stringify(text))
       }
-    }
 
-    // 处理剩余的缓冲区
-    if (pending) {
-      const lines = pending.split('\n')
-      for (const line of lines) {
-        if (line.startsWith('data: ')) {
-          fullAnswer += line.slice(6)
+      // SSE 标准格式：data: xxx\n\n
+      const lines = text.split(/\r?\n/)
+      for (let i = 0; i < lines.length; i++) {
+        const line = lines[i]
+        if (line.startsWith('data:')) {
+          const content = line.substring(5).trim()
+          if (content) {
+            fullAnswer += content
+            aiMsg.content = fullAnswer
+            nextTick(scrollToBottom)
+          }
         }
       }
     }
@@ -241,6 +233,7 @@ async function handleSend() {
     // 完成
     aiMsg.loading = false
     aiMsg.content = fullAnswer
+    console.log('[SSE] stream done, total length:', fullAnswer.length)
 
   } catch (err) {
     // 移除 AI 消息

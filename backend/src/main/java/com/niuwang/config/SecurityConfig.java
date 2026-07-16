@@ -2,6 +2,7 @@ package com.niuwang.config;
 
 import com.niuwang.common.response.Result;
 import com.niuwang.security.JwtAuthenticationFilter;
+import jakarta.servlet.DispatcherType;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.context.annotation.Bean;
@@ -109,6 +110,8 @@ public class SecurityConfig {
                     .accessDeniedHandler(accessDeniedHandler())
                     .authenticationEntryPoint(authenticationEntryPoint()))
             .authorizeHttpRequests(auth -> auth
+                // ASYNC 分发阶段放行（SSE 流式响应的异步回调）
+                .dispatcherTypeMatchers(DispatcherType.ASYNC).permitAll()
                 // 不需要认证的公开接口
                 .requestMatchers("/auth/login", "/auth/logout", "/auth/face-login", "/upload/**", "/doc.html", "/webjars/**", "/swagger-resources/**", "/v3/api-docs/**", "/druid/**").permitAll()
                 // 人脸匹配和注册需要认证（防止未授权访问）

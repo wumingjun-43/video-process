@@ -7,8 +7,11 @@ import com.niuwang.model.vo.KnowledgeFileVO;
 import com.niuwang.service.ChatAgentService;
 import com.niuwang.service.ChatHistoryService;
 import lombok.RequiredArgsConstructor;
+import lombok.extern.slf4j.Slf4j;
+import org.springframework.http.MediaType;
+import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.*;
-import reactor.core.publisher.Flux;
+import org.springframework.web.servlet.mvc.method.annotation.ResponseBodyEmitter;
 
 import java.util.List;
 import java.util.Map;
@@ -23,6 +26,7 @@ import java.util.Map;
  *   GET  /chat/knowledge-list - 获取可检索的知识文件列表
  *   GET  /chat/history       - 获取对话历史
  */
+@Slf4j
 @RestController
 @RequestMapping("/chat")
 @RequiredArgsConstructor
@@ -47,11 +51,53 @@ public class ChatController {
     }
 
     /** Agent 智能对话（流式 SSE） */
-    @PostMapping(value = "/ask-stream", produces = "text/event-stream;charset=UTF-8")
-    public Flux<String> askStream(@RequestBody AskDTO askDTO) {
-        String question = askDTO.getQuestion();
-        List<Long> knowledgeFileIds = askDTO.getKnowledgeFileIds();
-        return chatAgentService.chatStream(question, knowledgeFileIds);
+    @PostMapping(value = "/ask-stream", produces = MediaType.TEXT_EVENT_STREAM_VALUE + ";charset=UTF-8")
+    public ResponseBodyEmitter askStream(@RequestBody AskDTO askDTO) {
+        ResponseBodyEmitter emitter = new ResponseBodyEmitter(300_000L);
+
+        // 在子线程中执行流式输出，避免阻塞 Tomcat 线程
+        new Thread(() -> {
+            try {
+                chatAgentService.chatStream(askDTO.getQuestion(), askDTO.getKnowledgeFileIds())
+                        .subscribe(
+                                chunk -> {
+                                    try {
+                                        // 标准 SSE 格式：data: xxx\n\n
+                                        emitter.send("data: " + chunk + "\n\n", MediaType.TEXT_EVENT_STREAM);
+                                    } catch (Exception e) {
+                                        log.error("发送 SSE 数据失败", e);
+                                    }
+                                },
+                                error -> {
+                                    log.error("流式对话失败", error);
+                                    try {
+                                        emitter.send("data: [错误] " + error.getMessage() + "\n\n", MediaType.TEXT_EVENT_STREAM);
+                                    } catch (Exception ex) {
+                                        log.error("发送错误信息失败", ex);
+                                    }
+                                    emitter.completeWithError(error);
+                                },
+                                () -> {
+                                    try {
+                                        emitter.send(": connected\n\n", MediaType.TEXT_EVENT_STREAM);
+                                        emitter.complete();
+                                    } catch (Exception e) {
+                                        log.error("发送完成信号失败", e);
+                                    }
+                                }
+                        );
+            } catch (Exception e) {
+                log.error("启动 SSE 流失败", e);
+                emitter.completeWithError(e);
+            }
+        }).start();
+
+        // 客户端断开连接时的回调
+        emitter.onCompletion(() -> log.info("SSE 流完成"));
+        emitter.onTimeout(() -> log.info("SSE 流超时"));
+        emitter.onError((ex) -> log.error("SSE 流错误", ex));
+
+        return emitter;
     }
 
     /** 获取可检索的知识文件列表 */
@@ -67,4 +113,3 @@ public class ChatController {
         return Result.success(chatHistoryService.listRecent(limit));
     }
 }
-
