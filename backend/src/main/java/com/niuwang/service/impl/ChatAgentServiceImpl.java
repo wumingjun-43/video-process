@@ -1,6 +1,7 @@
 package com.niuwang.service.impl;
 
 import com.niuwang.common.exception.BusinessException;
+import com.niuwang.model.enums.KnowledgeFileStatus;
 import com.niuwang.model.vo.KnowledgeFileVO;
 import com.niuwang.service.*;
 import lombok.RequiredArgsConstructor;
@@ -112,7 +113,7 @@ public class ChatAgentServiceImpl implements ChatAgentService {
     public List<KnowledgeFileVO> listAvailableKnowledge() {
         List<KnowledgeFileVO> all = knowledgeGraphService.pageKnowledge(1, 10000).getRecords();
         return all.stream()
-                .filter(kf -> "done".equals(kf.getStatus()))
+                .filter(kf -> KnowledgeFileStatus.done.equals(kf.getStatus()))
                 .collect(Collectors.toList());
     }
 
@@ -141,8 +142,17 @@ public class ChatAgentServiceImpl implements ChatAgentService {
         String systemPrompt = buildSystemPrompt(intent);
         String ragContext = formatRagContext(rerankedDocs);
 
+        String intentContext = switch (intent) {
+            case BULL_KING -> "你是牛王识别专家";
+            case FACE_RECOGNITION -> "你是人脸识别系统专家";
+            case KNOWLEDGE_GRAPH -> "你是知识图谱管理专家";
+            default -> "你是专业智能助手";
+        };
+
         String prompt = String.format("""
                 %s
+
+                %s，请回答以下问题。
 
                 请严格遵循以下回答规则：
                 1. 只根据下方提供的【参考资料】回答用户问题
@@ -160,7 +170,7 @@ public class ChatAgentServiceImpl implements ChatAgentService {
 
                 %s
 
-                请回答：""", systemPrompt, ragContext, question);
+                请回答：""", systemPrompt, intentContext, ragContext, question);
 
         return configChatClient.prompt()
                 .user(prompt)
@@ -175,8 +185,17 @@ public class ChatAgentServiceImpl implements ChatAgentService {
         String systemPrompt = buildSystemPrompt(intent);
         String ragContext = formatRagContext(rerankedDocs);
 
+        String intentContext = switch (intent) {
+            case BULL_KING -> "你是牛王识别专家";
+            case FACE_RECOGNITION -> "你是人脸识别系统专家";
+            case KNOWLEDGE_GRAPH -> "你是知识图谱管理专家";
+            default -> "你是专业智能助手";
+        };
+
         String prompt = String.format("""
                 %s
+
+                %s，请回答以下问题。
 
                 请严格遵循以下回答规则：
                 1. 只根据下方提供的【参考资料】回答用户问题
@@ -196,7 +215,7 @@ public class ChatAgentServiceImpl implements ChatAgentService {
 
                 %s
 
-                请回答：""", systemPrompt, ragContext, question);
+                请回答：""", systemPrompt, intentContext, ragContext, question);
 
         return configChatClient.prompt()
                 .user(prompt)

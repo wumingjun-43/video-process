@@ -8,13 +8,38 @@ import com.niuwang.service.ChatAgentService;
 import com.niuwang.service.ChatHistoryService;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
+import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.http.MediaType;
-import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.*;
 import org.springframework.web.servlet.mvc.method.annotation.ResponseBodyEmitter;
 
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.Executor;
+import reactor.core.Disposable;
+
+/**
+ * SSE 事件格式工具
+ * 将 chunk 编码为 JSON 字符串，避免 \n \r \ 等字符破坏 SSE 格式
+ */
+final class SseEncoder {
+    private static final com.fasterxml.jackson.databind.ObjectMapper MAPPER =
+            new com.fasterxml.jackson.databind.ObjectMapper();
+
+    private SseEncoder() {}
+
+    /** 将文本编码为 SSE 消息: json: "encoded"\n\n */
+    static String encode(String text) {
+        try {
+            String json = MAPPER.writeValueAsString(text);
+            return "json: " + json;
+        } catch (Exception e) {
+            // 极端情况下降级：去掉换行
+            return "data: " + text.replace("\r", "").replace("\n", " ");
+        }
+    }
+}
+
 
 /**
  * 智能对话控制器
@@ -34,6 +59,8 @@ public class ChatController {
 
     private final ChatAgentService chatAgentService;
     private final ChatHistoryService chatHistoryService;
+
+    private final Executor sseTaskExecutor;
 
     /** Agent 智能对话（同步） */
     @PostMapping("/ask")
@@ -55,26 +82,39 @@ public class ChatController {
     public ResponseBodyEmitter askStream(@RequestBody AskDTO askDTO) {
         ResponseBodyEmitter emitter = new ResponseBodyEmitter(300_000L);
 
-        // 在子线程中执行流式输出，避免阻塞 Tomcat 线程
-        new Thread(() -> {
+        // 保存 Subscription 引用，用于客户端断开时取消后台执行
+        final class SubscriptionHolder {
+            Disposable disposable;
+        }
+        SubscriptionHolder holder = new SubscriptionHolder();
+
+        // 客户端完成/断开/超时时统一处理：取消后台 Flux 订阅 + 日志
+        emitter.onCompletion(() -> {
+            log.info("SSE 流结束");
+            if (holder.disposable != null && !holder.disposable.isDisposed()) {
+                holder.disposable.dispose();
+            }
+        });
+        emitter.onTimeout(() -> log.info("SSE 流超时"));
+        emitter.onError((ex) -> log.error("SSE 流错误", ex));
+
+        // 在线程池中执行流式输出，避免阻塞 Tomcat 线程
+        sseTaskExecutor.execute(() -> {
             try {
-                chatAgentService.chatStream(askDTO.getQuestion(), askDTO.getKnowledgeFileIds())
+                holder.disposable = chatAgentService.chatStream(askDTO.getQuestion(), askDTO.getKnowledgeFileIds())
                         .subscribe(
                                 chunk -> {
                                     try {
-                                        // 对 chunk 中的特殊字符做 SSE 转义
-                                        String escaped = chunk
-                                                .replace("\\", "\\\\")
-                                                .replace("\n", "\\n")
-                                                .replace("\r", "\\r")
-                                                .replace("data: ", "[DATA] "); // 避免 chunk 本身以 data: 开头
-                                        emitter.send("data: " + escaped + "\n\n", MediaType.TEXT_EVENT_STREAM);
+                                        emitter.send(SseEncoder.encode(chunk) + "\n\n", MediaType.TEXT_EVENT_STREAM);
                                     } catch (Exception e) {
-                                        log.error("发送 SSE 数据失败", e);
+                                        log.error("发送 SSE 数据失败，取消订阅", e);
+                                        if (holder.disposable != null) holder.disposable.dispose();
+                                        emitter.complete();
                                     }
                                 },
                                 error -> {
                                     log.error("流式对话失败", error);
+                                    if (holder.disposable != null) holder.disposable.dispose();
                                     try {
                                         emitter.send("data: [错误] " + error.getMessage() + "\n\n", MediaType.TEXT_EVENT_STREAM);
                                     } catch (Exception ex) {
@@ -83,6 +123,7 @@ public class ChatController {
                                     emitter.completeWithError(error);
                                 },
                                 () -> {
+                                    if (holder.disposable != null) holder.disposable.dispose();
                                     try {
                                         emitter.send(": connected\n\n", MediaType.TEXT_EVENT_STREAM);
                                         emitter.complete();
@@ -95,12 +136,7 @@ public class ChatController {
                 log.error("启动 SSE 流失败", e);
                 emitter.completeWithError(e);
             }
-        }).start();
-
-        // 客户端断开连接时的回调
-        emitter.onCompletion(() -> log.info("SSE 流完成"));
-        emitter.onTimeout(() -> log.info("SSE 流超时"));
-        emitter.onError((ex) -> log.error("SSE 流错误", ex));
+        });
 
         return emitter;
     }

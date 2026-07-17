@@ -118,6 +118,9 @@ const messages = ref([])
 const knowledgeList = ref([])
 const selectedKnowledgeIds = ref([])
 
+// 稳定的 SSE 事件缓冲区
+const sseBuffer = reactive({ raw: '' })
+
 // 滚动到底部
 function scrollToBottom() {
   nextTick(() => {
@@ -127,16 +130,41 @@ function scrollToBottom() {
   })
 }
 
-// 格式化消息（简单 Markdown 处理）
+// 格式化消息（Markdown 基础渲染）
 function formatMessage(text) {
   if (!text) return ''
-  return text
+
+  // 转义 HTML
+  let html = text
     .replace(/&/g, '&amp;')
     .replace(/</g, '&lt;')
     .replace(/>/g, '&gt;')
-    .replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>')
-    .replace(/\n/g, '<br>')
-    .replace(/(\d\..+)/g, '<br>$1')
+
+  // 代码块 ```...```
+  html = html.replace(/```([\s\S]*?)```/g, '<pre><code>$1</code></pre>')
+
+  // 行内代码 `...`
+  html = html.replace(/`([^`]+)`/g, '<code style="background:#f0f0f0;padding:1px 4px;border-radius:3px;">$1</code>')
+
+  // 粗体 **text**
+  html = html.replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>')
+
+  // 斜体 *text*
+  html = html.replace(/(?<!\*)\*(?!\*)(.+?)(?<!\*)\*(?!\*)/g, '<em>$1</em>')
+
+  // 有序列表 1. 2. 3.
+  html = html.replace(/^(\d+\.\s+.+)$/gm, '<div style="margin-left:1.2em">$1</div>')
+
+  // 无序列表 - 或 *
+  html = html.replace(/^[\s]*[-*]\s+.+/gm, (match) => `<div style="margin-left:1.2em">• ${match.replace(/^[\s]*[-*]\s+/, '')}</div>`)
+
+  // 换行
+  html = html.replace(/\n/g, '<br>')
+
+  // 清理连续多个 <br>
+  html = html.replace(/(<br>){3,}/g, '<br><br>')
+
+  return html
 }
 
 // 获取当前时间
@@ -166,7 +194,6 @@ async function handleSend() {
     content: '',
     time: getTime(),
     loading: true,
-    streamBuffer: '', // 流式缓冲
   })
   messages.value.push(aiMsg)
   scrollToBottom()
@@ -198,35 +225,77 @@ async function handleSend() {
       throw new Error(`HTTP ${response.status}: ${errorText}`)
     }
 
-    // 打印响应头，方便排查 SSE 格式问题
     console.log('[SSE] Content-Type:', response.headers.get('Content-Type'))
-    console.log('[SSE] Transfer-Encoding:', response.headers.get('Transfer-Encoding'))
 
     const reader = response.body.getReader()
     const decoder = new TextDecoder()
     let fullAnswer = ''
 
-    while (true) {
-      const { done, value } = await reader.read()
-      if (done) break
+    // 增量解析 SSE 事件
+    function parseSSEChunk(text) {
+      sseBuffer.raw += text
+      let pos = 0
+      let foundEnd = false
 
-      const text = decoder.decode(value, { stream: false })
-      if (text.trim()) {
-        console.log('[SSE] chunk:', JSON.stringify(text))
-      }
+      while (pos < sseBuffer.raw.length) {
+        // 查找完整 SSE 事件结束 (\n\n)
+        const doubleNewline = sseBuffer.raw.indexOf('\n\n', pos)
+        if (doubleNewline === -1) {
+          // 数据不完整，保留缓冲区等待下一批
+          break
+        }
 
-      // SSE 标准格式：data: xxx\n\n
-      const lines = text.split(/\r?\n/)
-      for (let i = 0; i < lines.length; i++) {
-        const line = lines[i]
-        if (line.startsWith('data:')) {
-          const content = line.substring(5).trim()
-          if (content) {
-            fullAnswer += content
-            aiMsg.content = fullAnswer
-            nextTick(scrollToBottom)
+        // 提取一个完整事件
+        const eventBlock = sseBuffer.raw.substring(pos, doubleNewline)
+        pos = doubleNewline + 2 // 跳过 \n\n
+
+        // 解析 data/json: xxx 行
+        const lines = eventBlock.split('\n')
+        for (const line of lines) {
+          if (line.startsWith('json:') || line.startsWith('data:')) {
+            let prefix = line.startsWith('json:') ? 'json:' : 'data:'
+            let content = line.substring(prefix.length)
+
+            // json: 字段携带 JSON 编码的字符串（带双引号），需先反序列化
+            if (prefix === 'json:') {
+              try {
+                content = JSON.parse(content)
+              } catch {
+                // 解析失败则当作普通文本
+              }
+            }
+
+            if (content) {
+              fullAnswer += content
+              aiMsg.content = fullAnswer
+              nextTick(scrollToBottom)
+            }
           }
         }
+
+        foundEnd = true
+      }
+
+      // 清理已解析的部分，保留未完成的尾部
+      if (foundEnd) {
+        sseBuffer.raw = sseBuffer.raw.substring(pos)
+      }
+    }
+
+    while (true) {
+      const { done, value } = await reader.read()
+      if (done) {
+        // 处理缓冲区剩余数据
+        if (sseBuffer.raw.length > 0) {
+          parseSSEChunk(sseBuffer.raw)
+          sseBuffer.raw = ''
+        }
+        break
+      }
+
+      const text = decoder.decode(value, { stream: false })
+      if (text.length > 0) {
+        parseSSEChunk(text)
       }
     }
 
@@ -430,6 +499,30 @@ onMounted(() => {
           line-height: 1.6;
           font-size: 14px;
           word-break: break-word;
+
+          pre {
+            background: #f6f8fa;
+            border-radius: 6px;
+            padding: 10px 14px;
+            margin: 8px 0;
+            overflow-x: auto;
+            font-size: 13px;
+            line-height: 1.5;
+
+            code {
+              background: none;
+              padding: 0;
+              border-radius: 0;
+            }
+          }
+
+          code {
+            background: #f0f0f0;
+            padding: 1px 5px;
+            border-radius: 3px;
+            font-size: 13px;
+            font-family: 'Consolas', 'Monaco', monospace;
+          }
         }
 
         .bubble-meta {

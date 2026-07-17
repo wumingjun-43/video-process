@@ -1,5 +1,8 @@
 package com.niuwang.service.impl;
 
+import com.fasterxml.jackson.core.type.TypeReference;
+import com.fasterxml.jackson.databind.DeserializationFeature;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import com.niuwang.common.exception.BusinessException;
 import com.niuwang.service.RagOnlineService;
 import lombok.RequiredArgsConstructor;
@@ -234,14 +237,13 @@ public class RagOnlineServiceImpl implements RagOnlineService {
     private List<RerankScore> parseRerankScores(String response, int docCount) {
         List<RerankScore> scores = new ArrayList<>();
         try {
-            // 尝试从响应中提取 JSON 数组
             String json = extractJsonArray(response);
             if (json != null) {
-                com.fasterxml.jackson.databind.ObjectMapper mapper =
+                ObjectMapper mapper =
                         new com.fasterxml.jackson.databind.ObjectMapper();
-                mapper.configure(com.fasterxml.jackson.databind.DeserializationFeature.FAIL_ON_UNKNOWN_PROPERTIES, false);
-                scores = mapper.readValue(json, ArrayList.class);
-
+                mapper.configure(DeserializationFeature.FAIL_ON_UNKNOWN_PROPERTIES, false);
+                TypeReference<List<RerankScore>> typeRef = new com.fasterxml.jackson.core.type.TypeReference<>() {};
+                scores = mapper.readValue(json, typeRef);
             }
         } catch (Exception e) {
             log.warn("解析 Rerank 评分失败: {}", e.getMessage());
@@ -300,15 +302,11 @@ public class RagOnlineServiceImpl implements RagOnlineService {
     }
 
     /** Rerank 评分结果 */
+    @lombok.Data
+    @lombok.AllArgsConstructor
+    @lombok.NoArgsConstructor
     static class RerankScore {
         int index;
         int score;
-
-        RerankScore() {}
-
-        RerankScore(int index, int score) {
-            this.index = index;
-            this.score = score;
-        }
     }
 }

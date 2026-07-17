@@ -17,6 +17,7 @@ import com.niuwang.service.AiRecognitionService;
 import com.niuwang.service.FaceEmbeddingService;
 import com.niuwang.service.MatchRecordService;
 import lombok.RequiredArgsConstructor;
+import lombok.extern.slf4j.Slf4j;
 import org.springframework.ai.chat.client.ChatClient;
 import org.springframework.ai.chat.messages.AssistantMessage;
 import org.springframework.ai.chat.messages.UserMessage;
@@ -44,7 +45,7 @@ import java.util.stream.Collectors;
  * 基于 spring-ai-alibaba DashScope 模型进行牛王匹配和特征分析
  */
 @Service
-
+@Slf4j
 public class AiRecognitionServiceImpl implements AiRecognitionService {
 
     private final ChatClient chatClient;
@@ -96,7 +97,7 @@ public class AiRecognitionServiceImpl implements AiRecognitionService {
                     new LambdaQueryWrapper<BullKing>().orderByDesc(BullKing::getCreateTime).last("LIMIT 20"));
 
             StringBuilder prompt = new StringBuilder();
-            prompt.append("You are a bull king image recognition assistant. Analyze this image and match it with known bull kings.\n\n");
+            prompt.append("你是一个牛王图像识别专家。分析此图片并与已知牛王进行匹配。\n\n");
             prompt.append("Known bull kings in database:\n");
             for (int i = 0; i < allBulls.size(); i++) {
                 BullKing bk = allBulls.get(i);
@@ -108,7 +109,7 @@ public class AiRecognitionServiceImpl implements AiRecognitionService {
             prompt.append("\nAnalyze the image features: horn, head, eye, fur, swirl, leg.\n");
             prompt.append("Then find the best matching bull king from the list.\n");
             prompt.append("Return ONLY a JSON object like this: {\"bullKingId\": 1, \"confidence\": 0.95, \"aiAnalysis\": \"brief analysis\", \"features\": {\"horn\": \"...\", \"head\": \"...\", \"eye\": \"...\", \"fur\": \"...\", \"swirl\": \"...\", \"leg\": \"...\"}}\n");
-            prompt.append("If no match found, return {\"bullKingId\": 0, \"confidence\": 0.0, \"aiAnalysis\": \"No match found\", \"features\": {}}");
+            prompt.append("如果未找到匹配，返回: {\"bullKingId\": 0, \"confidence\": 0.0, \"aiAnalysis\": \"未找到合适的匹配\", \"features\": {}}");
 
             // 使用 DashScope 多模态模型
             String aiResponse = chatModel.call(prompt.toString());
@@ -121,7 +122,7 @@ public class AiRecognitionServiceImpl implements AiRecognitionService {
                 File dir = new File(uploadPath + matchImageUrl).getParentFile();
                 if (!dir.exists()) dir.mkdirs();
                 imageFile.transferTo(new File(uploadPath + matchImageUrl));
-            } catch (Exception e) { /* ignore */ }
+            } catch (Exception e) { log.warn("保存匹配图片失败", e); }
 
             matchRecordService.saveMatchRecord(
                     result.getBullKingId() != null ? result.getBullKingId() : 0L,
@@ -133,7 +134,7 @@ public class AiRecognitionServiceImpl implements AiRecognitionService {
         } catch (BusinessException e) {
             throw e;
         } catch (Exception e) {
-            throw new BusinessException("AI matching failed: " + e.getMessage());
+            throw new BusinessException("牛王匹配失败: " + e.getMessage());
         }
     }
 
@@ -141,10 +142,10 @@ public class AiRecognitionServiceImpl implements AiRecognitionService {
     public FeatureAnalysisVO analyzeFeatures(Long knowledgeFileId) {
         try {
             List<BullKing> allBulls = bullKingMapper.selectList(
-                    new LambdaQueryWrapper<BullKing>().orderByDesc(BullKing::getCreateTime));
+                    new LambdaQueryWrapper<BullKing>().orderByDesc(BullKing::getCreateTime).last("LIMIT 50"));
 
             if (allBulls.isEmpty()) {
-                throw new BusinessException("No bull king data available for analysis");
+                throw new BusinessException("数据库中暂无牛王数据");
             }
 
             StringBuilder reference = new StringBuilder();
@@ -192,7 +193,7 @@ public class AiRecognitionServiceImpl implements AiRecognitionService {
         } catch (BusinessException e) {
             throw e;
         } catch (Exception e) {
-            throw new BusinessException("AI feature analysis failed: " + e.getMessage());
+            throw new BusinessException("特征分析失败: " + e.getMessage());
         }
     }
 
@@ -270,7 +271,7 @@ public class AiRecognitionServiceImpl implements AiRecognitionService {
                     setter.accept(json.substring(quote1 + 1, quote2));
                 }
             }
-        } catch (Exception ignored) {}
+        } catch (Exception e) { /* regex extraction is best-effort */ }
     }
 
     private String extractJson(String response) {
@@ -304,7 +305,7 @@ public class AiRecognitionServiceImpl implements AiRecognitionService {
                     .build();
 
             StringBuilder prompt = new StringBuilder();
-            prompt.append("You are a face recognition assistant. Your task is to identify which person from the reference photos matches the query photo.\n\n");
+            prompt.append("你是一个人脸识别专家。你的任务是识别参考照片中哪一张与查询照片匹配。\n\n");
             prompt.append("QUERY PHOTO:\n");
             prompt.append("(This is the photo to be identified)\n\n");
 
@@ -320,7 +321,7 @@ public class AiRecognitionServiceImpl implements AiRecognitionService {
             prompt.append("\nCompare the query photo with the reference photos above. ");
             prompt.append("Identify which user is the best match based on facial features. ");
             prompt.append("Return ONLY a JSON object: {\"userId\": <matched_user_id_or_0>, \"confidence\": <0-1>, \"aiAnalysis\": \"brief reasoning\"}\n");
-            prompt.append("If no match is good enough, return {\"userId\": 0, \"confidence\": 0.0, \"aiAnalysis\": \"No suitable match found\"}");
+            prompt.append("如果匹配不够好，返回: {\"userId\": 0, \"confidence\": 0.0, \"aiAnalysis\": \"未找到合适的匹配\"}");
 
             // 构建多模态消息
             List<org.springframework.ai.chat.messages.Message> messages = new ArrayList<>();
@@ -474,7 +475,7 @@ public class AiRecognitionServiceImpl implements AiRecognitionService {
             if (matcher.find()) {
                 BigDecimal confidence = new BigDecimal(matcher.group(1));
                 result.setConfidenceScore(confidence);
-                result.setIsMatch(confidence.doubleValue() >= 0.75);
+                result.setIsMatch(confidence.doubleValue() >= 0.75); // TODO: 阈值应可配置
             }
 
             Pattern analysisPattern = Pattern.compile("\"aiAnalysis\"\\s*:\\s*\"([^\"]*)\"");
@@ -499,6 +500,6 @@ public class AiRecognitionServiceImpl implements AiRecognitionService {
                     setter.accept(json.substring(quote1 + 1, quote2));
                 }
             }
-        } catch (Exception ignored) {}
+        } catch (Exception e) { /* regex extraction is best-effort */ }
     }
 }

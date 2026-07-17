@@ -7,6 +7,7 @@ import com.niuwang.common.exception.BusinessException;
 import com.niuwang.common.response.PageResult;
 import com.niuwang.mapper.KnowledgeFileMapper;
 import com.niuwang.model.entity.KnowledgeFile;
+import com.niuwang.model.enums.KnowledgeFileStatus;
 import com.niuwang.model.vo.KnowledgeFileVO;
 import com.niuwang.service.DocumentChunkerService;
 import com.niuwang.service.KnowledgeGraphService;
@@ -20,6 +21,7 @@ import org.springframework.core.io.InputStreamResource;
 import org.springframework.scheduling.annotation.Async;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
+import org.springframework.transaction.support.TransactionTemplate;
 import org.springframework.web.multipart.MultipartFile;
 
 import java.io.IOException;
@@ -38,6 +40,16 @@ public class KnowledgeGraphServiceImpl extends ServiceImpl<KnowledgeFileMapper, 
 
     private final VectorStore vectorStore;
     private final DocumentChunkerService documentChunkerService;
+    private final TransactionTemplate transactionTemplate;
+    private final org.springframework.beans.factory.ObjectProvider<KnowledgeGraphServiceImpl> selfProvider;
+
+    /**
+     * 懒加载的自身代理，用于调用 @Async 方法。
+     * 使用 ObjectProvider 而非直接注入，避免循环依赖。
+     */
+    private KnowledgeGraphServiceImpl self() {
+        return selfProvider.getObject();
+    }
 
     @Value("${file.upload.path}")
     private String uploadPath;
@@ -66,16 +78,16 @@ public class KnowledgeGraphServiceImpl extends ServiceImpl<KnowledgeFileMapper, 
         KnowledgeFile kf = new KnowledgeFile();
         kf.setFilename(originalName != null ? originalName : "unknown");
         kf.setFileType(ext);
-        kf.setStatus("pending");
+        kf.setStatus(KnowledgeFileStatus.pending);
         kf.setFilePath("");
         save(kf);
 
         // 将文件内容读取为字节数组，避免异步线程中临时文件被清理
         try {
             byte[] fileBytes = file.getBytes();
-            processKnowledgeFileAsync(kf.getId(), fileBytes, ext);
+            self().processKnowledgeFileAsync(kf.getId(), fileBytes, ext);
         } catch (IOException e) {
-            kf.setStatus("error");
+            kf.setStatus(KnowledgeFileStatus.error);
             kf.setErrorMsg("读取文件失败: " + e.getMessage());
             updateById(kf);
         }
@@ -84,6 +96,9 @@ public class KnowledgeGraphServiceImpl extends ServiceImpl<KnowledgeFileMapper, 
     /**
      * 离线阶段：异步处理知识文件
      * 流程：Tika 解析 → 文档切分 → Embedding 向量化 → pgvector 入库
+     *
+     * 注意：@Async 方法无法通过 @Transactional 获得事务（事务在原始线程获取），
+     * 因此使用 TransactionTemplate 显式管理事务。
      */
     @Async
     public void processKnowledgeFileAsync(Long fileId, byte[] fileBytes, String ext) {
@@ -91,59 +106,69 @@ public class KnowledgeGraphServiceImpl extends ServiceImpl<KnowledgeFileMapper, 
         if (kf == null) return;
 
         try {
-            kf.setStatus("processing");
-            baseMapper.updateById(kf);
+            // 在独立事务中执行所有 DB 写操作，确保原子性
+            transactionTemplate.execute(status -> {
+                try {
+                    kf.setStatus(KnowledgeFileStatus.processing);
+                    baseMapper.updateById(kf);
 
-            // 1. 保存文件到本地
-            String fileName = System.currentTimeMillis() + "." + ext;
-            String filePath = "/knowledge/" + fileName;
-            java.io.File fileDir = new java.io.File(uploadPath + filePath).getParentFile();
-            if (!fileDir.exists()) fileDir.mkdirs();
-            java.nio.file.Files.write(new java.io.File(uploadPath + filePath).toPath(), fileBytes);
-            kf.setFilePath(filePath);
+                    // 1. 保存文件到本地
+                    String fileName = System.currentTimeMillis() + "." + ext;
+                    String filePath = "/knowledge/" + fileName;
+                    java.io.File fileDir = new java.io.File(uploadPath + filePath).getParentFile();
+                    if (!fileDir.exists()) fileDir.mkdirs();
+                    java.nio.file.Files.write(new java.io.File(uploadPath + filePath).toPath(), fileBytes);
+                    kf.setFilePath(filePath);
 
-            // 2. 使用 TikaDocumentReader 解析文档（支持 PDF/Word/Excel 等格式）
-            List<Document> rawDocuments = extractDocuments(fileBytes, kf.getId());
+                    // 2. 使用 TikaDocumentReader 解析文档（支持 PDF/Word/Excel 等格式）
+                    List<Document> rawDocuments = extractDocuments(fileBytes, kf.getId());
 
-            if (rawDocuments.isEmpty()) {
-                kf.setStatus("error");
-                kf.setErrorMsg("文件解析失败，未提取到任何内容");
-                baseMapper.updateById(kf);
-                return;
-            }
+                    if (rawDocuments.isEmpty()) {
+                        kf.setStatus(KnowledgeFileStatus.error);
+                        kf.setErrorMsg("文件解析失败，未提取到任何内容");
+                        baseMapper.updateById(kf);
+                        return null;
+                    }
 
-            log.info("文件 {} 通过 Tika 解析得到 {} 个原始文档块", kf.getFilename(), rawDocuments.size());
+                    log.info("文件 {} 通过 Tika 解析得到 {} 个原始文档块", kf.getFilename(), rawDocuments.size());
 
-            // 3. 文档切分（Chunking）
-            List<Document> documents = new java.util.ArrayList<>();
-            for (Document rawDoc : rawDocuments) {
-                documents.addAll(documentChunkerService.chunk(
-                        rawDoc.getText(), kf.getId(), CHUNK_MAX_TOKENS, CHUNK_OVERLAP_TOKENS));
-            }
+                    // 3. 文档切分（Chunking）
+                    List<Document> documents = new java.util.ArrayList<>();
+                    for (Document rawDoc : rawDocuments) {
+                        documents.addAll(documentChunkerService.chunk(
+                                rawDoc.getText(), kf.getId(), CHUNK_MAX_TOKENS, CHUNK_OVERLAP_TOKENS));
+                    }
 
-            if (documents.isEmpty()) {
-                kf.setStatus("error");
-                kf.setErrorMsg("文档切分失败");
-                baseMapper.updateById(kf);
-                return;
-            }
+                    if (documents.isEmpty()) {
+                        kf.setStatus(KnowledgeFileStatus.error);
+                        kf.setErrorMsg("文档切分失败");
+                        baseMapper.updateById(kf);
+                        return null;
+                    }
 
-            log.info("文件 {} 切分为 {} 个 chunk，准备向量化入库", kf.getFilename(), documents.size());
+                    log.info("文件 {} 切分为 {} 个 chunk，准备向量化入库", kf.getFilename(), documents.size());
 
-            // 4. 存入向量库（自动调用 Embedding 模型向量化 → pgvector）
-            vectorStore.add(documents);
+                    // 4. 存入向量库（自动调用 Embedding 模型向量化 → pgvector）
+                    vectorStore.add(documents);
 
-            kf.setStatus("done");
-            baseMapper.updateById(kf);
-            log.info("知识文件处理完成: {}, {} 个 chunk 已入库", kf.getFilename(), documents.size());
-
+                    kf.setStatus(KnowledgeFileStatus.done);
+                    baseMapper.updateById(kf);
+                    log.info("知识文件处理完成: {}, {} 个 chunk 已入库", kf.getFilename(), documents.size());
+                    return null;
+                } catch (Exception e) {
+                    // 标记回滚，让 TransactionTemplate 回滚整个事务
+                    status.setRollbackOnly();
+                    throw new RuntimeException(e);
+                }
+            });
         } catch (Exception e) {
+            // TransactionTemplate 回滚后，确保文件状态设为 error
             log.error("知识文件处理失败: fileId={}", fileId, e);
             KnowledgeFile updateKf = getById(fileId);
-            if (updateKf != null) {
-                updateKf.setStatus("error");
-                updateKf.setErrorMsg("处理失败: " + e.getMessage());
-                baseMapper.updateById(updateKf);
+            if (updateKf != null && updateKf.getStatus() != KnowledgeFileStatus.done) {
+                updateKf.setStatus(KnowledgeFileStatus.error);
+                updateKf.setErrorMsg("处理失败: " + e.getCause().getMessage());
+                updateById(updateKf);
             }
         }
     }
@@ -196,7 +221,7 @@ public class KnowledgeGraphServiceImpl extends ServiceImpl<KnowledgeFileMapper, 
             vo.setId(kf.getId());
             vo.setFilename(kf.getFilename());
             vo.setFileType(kf.getFileType());
-            vo.setStatus(kf.getStatus());
+            vo.setStatus(kf.getStatus().getCode());
             vo.setErrorMsg(kf.getErrorMsg());
             vo.setCreateTime(kf.getCreateTime());
             return vo;

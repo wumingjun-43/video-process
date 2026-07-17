@@ -2,6 +2,7 @@ package com.niuwang.model.vo;
 
 import com.fasterxml.jackson.databind.annotation.JsonSerialize;
 import com.niuwang.common.serializer.LongToStringSerializer;
+import com.niuwang.model.enums.KnowledgeFileStatus;
 import lombok.Data;
 import java.time.LocalDateTime;
 

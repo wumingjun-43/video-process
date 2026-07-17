@@ -1,40 +1,37 @@
 package com.niuwang.config;
 
-import com.alibaba.cloud.ai.dashscope.api.DashScopeApi;
-import com.alibaba.cloud.ai.dashscope.chat.DashScopeChatModel;
-import com.alibaba.cloud.ai.dashscope.chat.DashScopeChatOptions;
 import org.springframework.ai.chat.client.ChatClient;
 import org.springframework.ai.chat.model.ChatModel;
 import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
+import org.springframework.scheduling.concurrent.ThreadPoolTaskExecutor;
 
+import java.util.concurrent.Executor;
+
+/**
+ * 自定义 Bean 配置
+ * ChatModel 由 Spring AI Alibaba 自动配置（DashScopeChatAutoConfiguration）提供
+ */
 @Configuration
 public class ChatClientConfig {
 
-    @Bean(name = "aa")
-    public ChatModel getChatMode(){
-        // 初始化 ChatModel
-        DashScopeApi dashScopeApi = DashScopeApi.builder()
-                .apiKey("sk-ws-H.RPLHMHY.C2m3.MEUCICbhNvXPok3Mp-HXri7_FRXD8lmZyr5j-oEBuFPURsAcAiEAkH4Z8mmZpbov7ux_Kl0Y5tDY8MOtkDM5daS0e8rOiwY")
-                .build();
-        ChatModel chatModel = DashScopeChatModel.builder()
-                .defaultOptions(DashScopeChatOptions.builder()
-                        .withModel(DashScopeChatModel.DEFAULT_MODEL_NAME)
-                        .withTemperature(0.7)    // 控制随机性
-                        .withMaxToken(2000)      // 最大输出长度
-                        .withTopP(0.9)           // 核采样参数
-                        .model("qwen-plus")
-                        .build())
-
-                .dashScopeApi(dashScopeApi).build();
-        return chatModel;
-    }
-    
+    /**
+     * 基于自动配置的 ChatModel 创建 ChatClient Bean
+     */
     @Bean("configChatClient")
-    public ChatClient chatClient(@Qualifier("aa") ChatModel chatModel) {
+    public ChatClient chatClient(@Qualifier("dashScopeChatModel") ChatModel chatModel) {
         return ChatClient.create(chatModel);
     }
-    
 
+    @Bean("sseTaskExecutor")
+    public Executor sseTaskExecutor() {
+        ThreadPoolTaskExecutor executor = new ThreadPoolTaskExecutor();
+        executor.setCorePoolSize(4);
+        executor.setMaxPoolSize(16);
+        executor.setQueueCapacity(100);
+        executor.setThreadNamePrefix("sse-");
+        executor.initialize();
+        return executor;
+    }
 }
