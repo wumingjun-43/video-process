@@ -1,7 +1,5 @@
 package com.niuwang.service.impl;
 
-import cn.hutool.core.collection.CollectionUtil;
-import cn.hutool.core.util.ArrayUtil;
 import com.niuwang.common.exception.BusinessException;
 import com.niuwang.model.vo.KnowledgeFileVO;
 import com.niuwang.service.*;
@@ -11,11 +9,8 @@ import org.springframework.ai.chat.client.ChatClient;
 import org.springframework.ai.document.Document;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
-import org.springframework.util.CollectionUtils;
 import reactor.core.publisher.Flux;
 
-import java.util.Collection;
-import java.util.Collections;
 import java.util.List;
 import java.util.stream.Collectors;
 
@@ -38,11 +33,10 @@ import java.util.stream.Collectors;
  * ║  语义重写    pgvector    LLM评分     DashScope         ║
  * ╚══════════════════════════════════════════════════════╝
  *
- * 在线阶段四步：
+ * 在线阶段三步：
  * 1. Intent + Query Rewrite: 意图分析 + 语义重写
- * 2. Coarse Retrieve: pgvector 向量相似度搜索 Top-20
- * 3. Rerank: LLM 深度评分，过滤不相关内容，保留 Top-5
- * 4. Generate: 组装多源信息 → DashScope 生成答案
+ * 2. Coarse Retrieve + Rerank: pgvector 向量相似度搜索 Top-20 → LLM 精排 Top-5
+ * 3. Generate: 组装多源信息 → DashScope 生成答案
  */
 @Slf4j
 @Service
@@ -51,7 +45,6 @@ public class ChatAgentServiceImpl implements ChatAgentService {
 
     private final ChatClient configChatClient;
     private final RagOnlineService ragOnlineService;
-    private final KnowledgeQueryService knowledgeQueryService;
     private final KnowledgeGraphService knowledgeGraphService;
     private final ChatHistoryService chatHistoryService;
 
@@ -71,14 +64,10 @@ public class ChatAgentServiceImpl implements ChatAgentService {
             List<Document> rerankedDocs = ragOnlineService.retrieve(question, knowledgeFileIds);
             log.info("RAG 精排后得到 {} 个相关片段", rerankedDocs.size());
 
-            // ========== Step 3: 知识图谱结构化查询 ==========
-            List<String> kgResults = knowledgeQueryService.queryKnowledgeGraph(question);
-            log.info("知识图谱查询得到 {} 条结果", kgResults.size());
+            // ========== Step 3: 答案生成 ==========
+            String answer = generateAnswer(question, rerankedDocs, intent);
 
-            // ========== Step 4: 答案生成 ==========
-            String answer = generateAnswer(question, rerankedDocs, kgResults, intent);
-
-            // ========== Step 5: 保存对话历史 ==========
+            // ========== Step 4: 保存对话历史 ==========
             saveHistory(question, answer, knowledgeFileIds);
 
             log.info("Agent 对话完成: questionLen={}, answerLen={}",
@@ -108,12 +97,8 @@ public class ChatAgentServiceImpl implements ChatAgentService {
             List<Document> rerankedDocs = ragOnlineService.retrieve(question, knowledgeFileIds);
             log.info("RAG 精排后得到 {} 个相关片段", rerankedDocs.size());
 
-            // ========== Step 3: 知识图谱结构化查询 ==========
-            List<String> kgResults = knowledgeQueryService.queryKnowledgeGraph(question);
-            log.info("知识图谱查询得到 {} 条结果", kgResults.size());
-
-            // ========== Step 4: 流式答案生成 ==========
-            return generateAnswerStream(question, rerankedDocs, kgResults, intent);
+            // ========== Step 3: 流式答案生成 ==========
+            return generateAnswerStream(question, rerankedDocs, intent);
 
         } catch (BusinessException e) {
             return Flux.error(e);
@@ -150,13 +135,11 @@ public class ChatAgentServiceImpl implements ChatAgentService {
         return AgentIntent.KNOWLEDGE_RETRIEVAL;
     }
 
-    // ==================== Step 4: 答案生成 ====================
+    // ==================== Step 3: 答案生成 ====================
 
-    private String generateAnswer(String question, List<Document> rerankedDocs,
-                                   List<String> kgResults, AgentIntent intent) {
+    private String generateAnswer(String question, List<Document> rerankedDocs, AgentIntent intent) {
         String systemPrompt = buildSystemPrompt(intent);
         String ragContext = formatRagContext(rerankedDocs);
-        String kgContext = kgResults.isEmpty() ? "（知识图谱查询无结果）" : String.join("\n", kgResults);
 
         String prompt = String.format("""
                 %s
@@ -173,14 +156,11 @@ public class ChatAgentServiceImpl implements ChatAgentService {
                 【RAG 向量检索结果】（按相关性排序）
                 %s
 
-                【知识图谱查询结果】
-                %s
-
                 === 用户问题 ===
 
                 %s
 
-                请回答：""", systemPrompt, ragContext, kgContext, question);
+                请回答：""", systemPrompt, ragContext, question);
 
         return configChatClient.prompt()
                 .user(prompt)
@@ -191,11 +171,9 @@ public class ChatAgentServiceImpl implements ChatAgentService {
     /**
      * 流式答案生成
      */
-    private Flux<String> generateAnswerStream(String question, List<Document> rerankedDocs,
-                                               List<String> kgResults, AgentIntent intent) {
+    private Flux<String> generateAnswerStream(String question, List<Document> rerankedDocs, AgentIntent intent) {
         String systemPrompt = buildSystemPrompt(intent);
         String ragContext = formatRagContext(rerankedDocs);
-        String kgContext = kgResults.isEmpty() ? "（知识图谱查询无结果）" : String.join("\n", kgResults);
 
         String prompt = String.format("""
                 %s
@@ -206,20 +184,19 @@ public class ChatAgentServiceImpl implements ChatAgentService {
                 3. 如果参考资料中没有相关信息，请明确告知用户"根据现有资料无法回答该问题"
                 4. 不要编造资料中不存在的信息
                 5. 回答请使用中文，条理清晰，必要时使用分点说明
+                6. 存在多段内容时候，请清晰分段换行输出，次分明逻辑清晰
+                7. 有重叠内容时候，请正确合并
 
                 === 参考资料 ===
 
                 【RAG 向量检索结果】（按相关性排序）
                 %s
 
-                【知识图谱查询结果】
-                %s
-
                 === 用户问题 ===
 
                 %s
 
-                请回答：""", systemPrompt, ragContext, kgContext, question);
+                请回答：""", systemPrompt, ragContext, question);
 
         return configChatClient.prompt()
                 .user(prompt)

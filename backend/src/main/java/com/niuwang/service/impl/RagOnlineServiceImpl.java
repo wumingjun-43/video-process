@@ -8,10 +8,6 @@ import org.springframework.ai.chat.client.ChatClient;
 import org.springframework.ai.document.Document;
 import org.springframework.ai.vectorstore.SearchRequest;
 import org.springframework.ai.vectorstore.VectorStore;
-import org.springframework.ai.vectorstore.filter.Filter;
-import org.springframework.ai.vectorstore.filter.Filter.Expression;
-import org.springframework.ai.vectorstore.filter.Filter.ExpressionType;
-import org.springframework.ai.vectorstore.filter.Filter.Key;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Service;
 
@@ -23,7 +19,7 @@ import java.util.stream.Collectors;
  *
  * 在线阶段完整流程：
  * 1. Query 处理：意图分析 + 语义重写（将口语化问题改写为更适合检索的形式）
- * 2. 向量检索(粗排)：从 pgvector 检索 Top-20
+ * 2. 向量检索(粗排)：从 pgvector 检索 Top-20（应用层按 source_id 过滤）
  * 3. Rerank(精排)：用 LLM 对粗排结果做深度相关性评分，取 Top-5
  * 4. 组装上下文供答案生成
  */
@@ -51,9 +47,21 @@ public class RagOnlineServiceImpl implements RagOnlineService {
             String rewrittenQuery = rewriteQuery(question);
             log.info("Query 处理完成: 原问题='{}', 重写='{}'", question, rewrittenQuery);
 
-            // ===== Step 2: 向量检索 (粗排) =====
-            List<Document> coarseDocs = coarseRetrieve(rewrittenQuery, knowledgeFileIds);
-            log.info("粗排检索到 {} 个文档片段", coarseDocs.size());
+            // ===== Step 2: 向量检索 (粗排) - 原始 query + 重写 query 各查一次，合并去重 =====
+            List<Document> docsOriginal = searchByQuery(question, knowledgeFileIds);
+            List<Document> docsRewritten = searchByQuery(rewrittenQuery, knowledgeFileIds);
+
+            Set<String> seen = new HashSet<>();
+            List<Document> coarseDocs = new ArrayList<>();
+            for (Document doc : docsOriginal) {
+                if (seen.add(doc.getText())) coarseDocs.add(doc);
+            }
+            for (Document doc : docsRewritten) {
+                if (seen.add(doc.getText())) coarseDocs.add(doc);
+            }
+
+            log.info("粗排检索合并: 原始={} → 重写={} → 合并去重后={}",
+                    docsOriginal.size(), docsRewritten.size(), coarseDocs.size());
 
             if (coarseDocs.isEmpty()) {
                 return Collections.emptyList();
@@ -75,8 +83,7 @@ public class RagOnlineServiceImpl implements RagOnlineService {
 
     /**
      * Query 语义重写
-     * 将口语化、模糊的问题改写为更适合向量检索的形式
-     * 例如："上次说的那个方案怎么样" → "XX方案的具体内容和评价"
+     * 将口语化、模糊的问题改写为更适合知识库检索的形式
      */
     private String rewriteQuery(String question) {
         try {
@@ -113,56 +120,38 @@ public class RagOnlineServiceImpl implements RagOnlineService {
     }
 
     /**
-     * 向量检索（粗排）
-     * 从 pgvector 中快速检索 Top-K 最相似的文档
+     * 单次向量检索 + 应用层过滤
      */
-    private List<Document> coarseRetrieve(String query, List<Long> knowledgeFileIds) {
+    private List<Document> searchByQuery(String query, List<Long> knowledgeFileIds) {
         try {
-            SearchRequest.Builder builder = SearchRequest.builder()
+            SearchRequest searchRequest = SearchRequest.builder()
                     .query(query)
-                    .topK(COARSE_TOP_K);
+                    .topK(COARSE_TOP_K)
+                    .build();
 
-            // 如果指定了知识文件范围，通过 metadata 过滤
-            if (knowledgeFileIds != null && !knowledgeFileIds.isEmpty()) {
-                // 用编程式 Filter API 构建 OR 表达式（IN 在 PgVector 中有 jsonpath bug）
-                Filter.Expression orExpr = buildOrExpression(knowledgeFileIds);
-                builder.filterExpression(orExpr);
+            List<Document> allDocs = vectorStore.similaritySearch(searchRequest);
+
+            // 如果没有指定文件范围，返回全部
+            if (knowledgeFileIds == null || knowledgeFileIds.isEmpty()) {
+                return allDocs;
             }
 
-            return vectorStore.similaritySearch(builder.build());
+            // 应用层过滤：只保留 source_id 在指定范围内的文档
+            Set<String> allowedIds = knowledgeFileIds.stream()
+                    .map(String::valueOf)
+                    .collect(Collectors.toSet());
 
+            return allDocs.stream()
+                    .filter(doc -> {
+                        if (doc.getMetadata() == null) return false;
+                        Object sourceId = doc.getMetadata().get("source_id");
+                        return sourceId != null && allowedIds.contains(sourceId.toString());
+                    })
+                    .collect(Collectors.toList());
         } catch (Exception e) {
-            log.error("粗排检索失败", e);
+            log.error("向量检索失败: query='{}'", query, e);
             return Collections.emptyList();
         }
-    }
-
-    /**
-     * 构建 OR 表达式: source_id='1' OR source_id='2' OR ...
-     */
-    private Filter.Expression buildOrExpression(List<Long> ids) {
-        if (ids.size() == 1) {
-            return new Filter.Expression(
-                    ExpressionType.EQ,
-                    new Filter.Key("source_id"),
-                    new Filter.Value(ids.get(0).toString())
-            );
-        }
-        // 递归构建 OR 树: OR(left, OR(right1, right2, ...))
-        Filter.Expression result = new Filter.Expression(
-                ExpressionType.EQ,
-                new Filter.Key("source_id"),
-                new Filter.Value(ids.get(0).toString())
-        );
-        for (int i = 1; i < ids.size(); i++) {
-            Filter.Expression eq = new Filter.Expression(
-                    ExpressionType.EQ,
-                    new Filter.Key("source_id"),
-                    new Filter.Value(ids.get(i).toString())
-            );
-            result = new Filter.Expression(ExpressionType.OR, result, eq);
-        }
-        return result;
     }
 
     /**
@@ -250,8 +239,9 @@ public class RagOnlineServiceImpl implements RagOnlineService {
             if (json != null) {
                 com.fasterxml.jackson.databind.ObjectMapper mapper =
                         new com.fasterxml.jackson.databind.ObjectMapper();
-                RerankScore[] arr = mapper.readValue(json, RerankScore[].class);
-                scores = Arrays.asList(arr);
+                mapper.configure(com.fasterxml.jackson.databind.DeserializationFeature.FAIL_ON_UNKNOWN_PROPERTIES, false);
+                scores = mapper.readValue(json, ArrayList.class);
+
             }
         } catch (Exception e) {
             log.warn("解析 Rerank 评分失败: {}", e.getMessage());

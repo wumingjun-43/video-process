@@ -17,10 +17,8 @@ public class ChatClientConfig {
         // 初始化 ChatModel
         DashScopeApi dashScopeApi = DashScopeApi.builder()
                 .apiKey("sk-ws-H.RPLHMHY.C2m3.MEUCICbhNvXPok3Mp-HXri7_FRXD8lmZyr5j-oEBuFPURsAcAiEAkH4Z8mmZpbov7ux_Kl0Y5tDY8MOtkDM5daS0e8rOiwY")
-
                 .build();
         ChatModel chatModel = DashScopeChatModel.builder()
-
                 .defaultOptions(DashScopeChatOptions.builder()
                         .withModel(DashScopeChatModel.DEFAULT_MODEL_NAME)
                         .withTemperature(0.7)    // 控制随机性

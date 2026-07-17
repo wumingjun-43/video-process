@@ -62,8 +62,13 @@ public class ChatController {
                         .subscribe(
                                 chunk -> {
                                     try {
-                                        // 标准 SSE 格式：data: xxx\n\n
-                                        emitter.send("data: " + chunk + "\n\n", MediaType.TEXT_EVENT_STREAM);
+                                        // 对 chunk 中的特殊字符做 SSE 转义
+                                        String escaped = chunk
+                                                .replace("\\", "\\\\")
+                                                .replace("\n", "\\n")
+                                                .replace("\r", "\\r")
+                                                .replace("data: ", "[DATA] "); // 避免 chunk 本身以 data: 开头
+                                        emitter.send("data: " + escaped + "\n\n", MediaType.TEXT_EVENT_STREAM);
                                     } catch (Exception e) {
                                         log.error("发送 SSE 数据失败", e);
                                     }
