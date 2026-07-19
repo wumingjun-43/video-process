@@ -113,7 +113,7 @@ public class ChatAgentServiceImpl implements ChatAgentService {
     public List<KnowledgeFileVO> listAvailableKnowledge() {
         List<KnowledgeFileVO> all = knowledgeGraphService.pageKnowledge(1, 10000).getRecords();
         return all.stream()
-                .filter(kf -> KnowledgeFileStatus.done.equals(kf.getStatus()))
+                .filter(kf -> KnowledgeFileStatus.done.getCode().equals(kf.getStatus()))
                 .collect(Collectors.toList());
     }
 

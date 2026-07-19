@@ -8,16 +8,16 @@ import java.util.List;
  * 文档切分服务
  * 离线阶段：将完整文档按语义切分为多个 chunk
  *
- * 策略：
- * - 按段落分割（双换行符分隔）
- * - 每个 chunk 不超过 maxTokens token（约 500~800 字）
- * - 相邻 chunk 之间重叠 overlapTokens token（约 100 字），避免语义断裂
- * - 每个 chunk 附带 source_id metadata 用于 RAG 检索过滤
+ * 策略模式：通过 rag.chunking.strategy 配置项选择切割策略
+ * - fixed_size: 固定大小切割（简单高效，带重叠）
+ * - semantic: 语义边界切割（按段落/句子/标题层级）
+ * - special_content: 特殊内容专项处理（代码以函数为单位、表格整块保留）
+ * - parent_child: 父子切割（检索用小chunk精准定位，返回用大chunk完整上下文）
  */
 public interface DocumentChunkerService {
 
     /**
-     * 将完整文本切分为多个语义 chunk
+     * 将完整文本切分为多个 chunk
      *
      * @param text           完整文本内容
      * @param sourceId       来源文件 ID（用于 metadata）

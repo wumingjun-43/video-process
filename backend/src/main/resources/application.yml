@@ -163,12 +163,32 @@ face:
     confidence-threshold: 0.75
 
 # =====================================================
-# RAG 检索配置
+# RAG 检索 & 文档切割配置
 # =====================================================
 rag:
   retrieval:
     top-k: 5
     max-chunk-size: 800
+
+  # 文档切割策略配置
+  chunking:
+    # 切割策略类型: fixed_size | semantic | special_content | parent_child
+    # fixed_size    - 固定大小切割（简单高效，带重叠，适合快速基线）
+    # semantic      - 语义边界切割（按段落/句子/标题层级，推荐默认）
+    # special_content - 特殊内容专项处理（代码以函数为单位、表格整块保留）
+    # parent_child  - 父子切割（检索用小chunk精准，返回用大chunk完整上下文）
+    strategy: semantic
+
+    # 每个 chunk 最大 token 数（1 token ≈ 2 中文字）
+    max-tokens: 600
+
+    # 相邻 chunk 重叠 token 数，缓解边界截断
+    overlap-tokens: 100
+
+    # 父子切割专属参数
+    child-max-tokens: 200    # 子 chunk（检索用）
+    parent-max-tokens: 1000  # 父 chunk（返回用，含上下文）
+    parent-overlap-tokens: 50
 
 # =====================================================
 # 日志配置
