@@ -92,14 +92,14 @@ spring:
 
 # --- DashScope API Key ---
 dashscope:
-  api-key: sk-ws-H.RPLHMHY.C2m3.MEUCICbhNvXPok3Mp-HXri7_FRXD8lmZyr5j-oEBuFPURsAcAiEAkH4Z8mmZpbov7ux_Kl0Y5tDY8MOtkDM5daS0e8rOiwY
+  api-key: AcAiEAkH4Z8mmZpbov7ux_Kl0Y5tDY8MOtkDM5daS0e8rOiwY
 
   # --- Spring AI Alibaba (DashScope) 配置 ---
   ai:
     dashscope:
       base-url: https://dashscope.aliyuncs.com
       chat:
-        api-key: sk-ws-H.RPLHMHY.C2m3.MEUCICbhNvXPok3Mp-HXri7_FRXD8lmZyr5j-oEBuFPURsAcAiEAkH4Z8mmZpbov7ux_Kl0Y5tDY8MOtkDM5daS0e8rOiwY
+        api-key: EAkH4Z8mmZpbov7ux_Kl0Y5tDY8MOtkDM5daS0e8rOiwY
         options:
           model: qwen-vl-max
           temperature: 0.3
